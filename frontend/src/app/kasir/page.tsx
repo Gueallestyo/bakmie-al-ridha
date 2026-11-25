@@ -1,38 +1,36 @@
-import { Suspense } from 'react'
+import { Suspense, type ComponentProps, type ReactNode } from 'react'
+import { connection } from 'next/server'
 import RoleGuard from '@/components/auth/role-guard'
-import { signOut } from '@/features/auth/auth-actions'
 import AuthLoading from '@/components/auth/auth-loading'
+import InputPesananView from '@/features/kasir/input-pesanan-view'
+
+type BaseRole = ComponentProps<typeof RoleGuard>['role']
+
+function KasirAccessGuard({
+  role,
+  children,
+}: {
+  role: BaseRole | 'kasir-or-admin'
+  children: ReactNode
+}) {
+  const mappedRole: BaseRole = role === 'kasir-or-admin' ? 'kasir' : role
+  return <RoleGuard role={mappedRole}>{children}</RoleGuard>
+}
+
+async function KasirPageContent() {
+  await connection()
+
+  return (
+    <KasirAccessGuard role="kasir-or-admin">
+      <InputPesananView />
+    </KasirAccessGuard>
+  )
+}
 
 export default function KasirPage() {
   return (
     <Suspense fallback={<AuthLoading />}>
-      <RoleGuard role="kasir-or-admin">
-        <div className="min-h-screen bg-zinc-50 p-4">
-          <div className="max-w-xl mx-auto">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h1 className="text-xl font-bold text-zinc-900">Dashboard Kasir</h1>
-                <p className="text-zinc-600">
-                  Selamat datang di area kasir Bakmie Al-Ridha.
-                </p>
-              </div>
-              <button
-                onClick={() => signOut()}
-                className="px-4 py-2 border border-red-200 rounded-lg text-red-700 hover:bg-red-50 transition-colors"
-              >
-                Keluar
-              </button>
-            </div>
-
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-zinc-200">
-              <p className="text-zinc-600">
-                Halaman kasir (pesanan, pembayaran, laporan) akan
-                diimplementasikan pada tahap berikutnya.
-              </p>
-            </div>
-          </div>
-        </div>
-      </RoleGuard>
+      <KasirPageContent />
     </Suspense>
   )
 }

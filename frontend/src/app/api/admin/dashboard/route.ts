@@ -39,16 +39,21 @@ export async function GET(req: NextRequest) {
     for (const pesanan of pesananDibayar || []) {
       totalOmzet += Number(pesanan.total_harga || 0);
 
-      const details = (pesanan.detail_pesanan as Array<{
-        jumlah: number;
-        menu: { nama_menu: string } | null;
-      }>) || [];
+      const rawDetails = (pesanan.detail_pesanan ?? []) as Array<{
+        jumlah?: number | string | null;
+        menu?:
+          | { nama_menu?: string | null }
+          | Array<{ nama_menu?: string | null }>
+          | null;
+      }>;
 
-      for (const item of details) {
-        const qty = Number(item.jumlah || 0);
-        totalPorsiTerjual += qty;
-        const namaMenu = item.menu?.nama_menu || 'Menu Lainnya';
-        hitungPerMenu[namaMenu] = (hitungPerMenu[namaMenu] || 0) + qty;
+      for (const item of rawDetails) {
+        const jumlah = Number(item.jumlah ?? 0);
+        const menuObj = Array.isArray(item.menu) ? item.menu[0] : item.menu;
+        const namaMenu = menuObj?.nama_menu?.trim() || 'Menu Lainnya';
+
+        totalPorsiTerjual += jumlah;
+        hitungPerMenu[namaMenu] = (hitungPerMenu[namaMenu] ?? 0) + jumlah;
       }
     }
 

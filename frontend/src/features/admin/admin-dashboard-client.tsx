@@ -430,10 +430,10 @@ export default function AdminDashboardClient() {
         <MobileAdminDrawer
           open={drawerOpen}
           activeKey="dashboard"
+          userRole="admin"
           signingOut={signingOut}
           onClose={() => setDrawerOpen(false)}
           onLogout={handleLogout}
-          onSelectLaporan={() => setPeriod('7days')}
         />
       </div>
     </div>

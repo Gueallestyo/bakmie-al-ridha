@@ -1,63 +1,31 @@
 'use client'
 
+import { useState } from 'react'
 import Link from 'next/link'
 
 export type AdminDrawerNavKey =
   | 'dashboard'
+  | 'dashboard-admin'
+  | 'dashboard-kasir'
   | 'kelola-data'
   | 'kuota-harian'
-  | 'laporan-penjualan'
   | 'akun-staf'
+  | 'daftar-pesanan'
 
 interface MobileAdminDrawerProps {
   open: boolean
   activeKey: AdminDrawerNavKey
+  userRole?: 'admin' | 'kasir'
   signingOut: boolean
   onClose: () => void
   onLogout: () => void
-  onSelectLaporan?: () => void
 }
-
-interface DrawerMenuItem {
-  key: AdminDrawerNavKey
-  label: string
-  href: string
-  icon: 'grid' | 'edit' | 'list' | 'plus'
-}
-
-const DRAWER_ITEMS: DrawerMenuItem[] = [
-  { key: 'dashboard', label: 'Dashboard', href: '/admin', icon: 'grid' },
-  {
-    key: 'kelola-data',
-    label: 'Kelola Data',
-    href: '/admin/kelola-data',
-    icon: 'edit',
-  },
-  {
-    key: 'kuota-harian',
-    label: 'Kuota Harian',
-    href: '/admin/menu',
-    icon: 'list',
-  },
-  {
-    key: 'laporan-penjualan',
-    label: 'Laporan Penjualan',
-    href: '/admin',
-    icon: 'list',
-  },
-  {
-    key: 'akun-staf',
-    label: 'Akun Staf',
-    href: '/admin/akun',
-    icon: 'plus',
-  },
-]
 
 function DrawerItemIcon({
   icon,
   isActive,
 }: {
-  icon: DrawerMenuItem['icon']
+  icon: 'grid' | 'edit' | 'list' | 'plus'
   isActive: boolean
 }) {
   const colorClass = isActive ? 'text-[#C62828]' : 'text-[#262626]'
@@ -139,12 +107,23 @@ function DrawerItemIcon({
 export default function MobileAdminDrawer({
   open,
   activeKey,
+  userRole = 'admin',
   signingOut,
   onClose,
   onLogout,
-  onSelectLaporan,
 }: MobileAdminDrawerProps) {
+  const isDashboardGroupActive =
+    activeKey === 'dashboard' ||
+    activeKey === 'dashboard-admin' ||
+    activeKey === 'dashboard-kasir'
+
+  const [dashboardDropdownOpen, setDashboardDropdownOpen] = useState<boolean>(
+    isDashboardGroupActive,
+  )
+
   if (!open) return null
+
+  const isAdmin = userRole === 'admin'
 
   return (
     <div className="fixed inset-0 z-40 flex justify-center bg-black/50">
@@ -167,49 +146,170 @@ export default function MobileAdminDrawer({
 
             {/* Daftar Menu Navigasi */}
             <nav
-              aria-label="Menu Samping Admin"
+              aria-label="Menu Samping Aplikasi"
               className="px-3.5 pt-4 space-y-1"
             >
-              {DRAWER_ITEMS.map((item) => {
-                const isActive = activeKey === item.key
-
-                if (item.key === 'laporan-penjualan' && onSelectLaporan) {
-                  return (
+              {isAdmin ? (
+                <>
+                  {/* Item Dashboard dengan Dropdown khusus Role Admin */}
+                  <div>
                     <button
-                      key={item.key}
                       type="button"
-                      onClick={() => {
-                        onSelectLaporan()
-                        onClose()
-                      }}
-                      className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-full text-left text-[14.5px] transition-colors ${
-                        isActive
+                      onClick={() =>
+                        setDashboardDropdownOpen((prev) => !prev)
+                      }
+                      aria-expanded={dashboardDropdownOpen}
+                      className={`w-full flex items-center justify-between gap-2 px-3.5 py-3 rounded-full text-left text-[14.5px] transition-colors ${
+                        isDashboardGroupActive
                           ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
                           : 'text-[#262626] font-medium hover:bg-zinc-50'
                       }`}
                     >
-                      <DrawerItemIcon icon={item.icon} isActive={isActive} />
-                      <span>{item.label}</span>
+                      <span className="flex items-center gap-3.5">
+                        <DrawerItemIcon
+                          icon="grid"
+                          isActive={isDashboardGroupActive}
+                        />
+                        <span>Dashboard</span>
+                      </span>
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className={`shrink-0 transition-transform duration-200 ${
+                          dashboardDropdownOpen ? 'rotate-180' : ''
+                        }`}
+                      >
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
                     </button>
-                  )
-                }
 
-                return (
+                    {dashboardDropdownOpen && (
+                      <div className="mt-1 ml-7 pl-3 border-l border-[#F3D8D5] space-y-1">
+                        <Link
+                          href="/admin"
+                          onClick={onClose}
+                          className={`block px-3.5 py-2 rounded-full text-[13.5px] transition-colors ${
+                            activeKey === 'dashboard' ||
+                            activeKey === 'dashboard-admin'
+                              ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
+                              : 'text-[#4A4443] font-medium hover:bg-zinc-50'
+                          }`}
+                        >
+                          Dashboard Admin
+                        </Link>
+
+                        <Link
+                          href="/kasir"
+                          onClick={onClose}
+                          className={`block px-3.5 py-2 rounded-full text-[13.5px] transition-colors ${
+                            activeKey === 'dashboard-kasir'
+                              ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
+                              : 'text-[#4A4443] font-medium hover:bg-zinc-50'
+                          }`}
+                        >
+                          Dashboard Kasir
+                        </Link>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Kelola Data */}
                   <Link
-                    key={item.key}
-                    href={item.href}
+                    href="/admin/kelola-data"
                     onClick={onClose}
                     className={`flex items-center gap-3.5 px-3.5 py-3 rounded-full text-[14.5px] transition-colors ${
-                      isActive
+                      activeKey === 'kelola-data'
                         ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
                         : 'text-[#262626] font-medium hover:bg-zinc-50'
                     }`}
                   >
-                    <DrawerItemIcon icon={item.icon} isActive={isActive} />
-                    <span>{item.label}</span>
+                    <DrawerItemIcon
+                      icon="edit"
+                      isActive={activeKey === 'kelola-data'}
+                    />
+                    <span>Kelola Data</span>
                   </Link>
-                )
-              })}
+
+                  {/* Kuota Harian */}
+                  <Link
+                    href="/admin/menu"
+                    onClick={onClose}
+                    className={`flex items-center gap-3.5 px-3.5 py-3 rounded-full text-[14.5px] transition-colors ${
+                      activeKey === 'kuota-harian'
+                        ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
+                        : 'text-[#262626] font-medium hover:bg-zinc-50'
+                    }`}
+                  >
+                    <DrawerItemIcon
+                      icon="list"
+                      isActive={activeKey === 'kuota-harian'}
+                    />
+                    <span>Kuota Harian</span>
+                  </Link>
+
+                  {/* Akun Staf */}
+                  <Link
+                    href="/admin/akun"
+                    onClick={onClose}
+                    className={`flex items-center gap-3.5 px-3.5 py-3 rounded-full text-[14.5px] transition-colors ${
+                      activeKey === 'akun-staf'
+                        ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
+                        : 'text-[#262626] font-medium hover:bg-zinc-50'
+                    }`}
+                  >
+                    <DrawerItemIcon
+                      icon="plus"
+                      isActive={activeKey === 'akun-staf'}
+                    />
+                    <span>Akun Staf</span>
+                  </Link>
+                </>
+              ) : (
+                <>
+                  {/* Menu Khusus Role Kasir (Tanpa Dropdown & Tanpa Akses Admin) */}
+                  <Link
+                    href="/kasir"
+                    onClick={onClose}
+                    className={`flex items-center gap-3.5 px-3.5 py-3 rounded-full text-[14.5px] transition-colors ${
+                      activeKey === 'dashboard' ||
+                      activeKey === 'dashboard-kasir'
+                        ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
+                        : 'text-[#262626] font-medium hover:bg-zinc-50'
+                    }`}
+                  >
+                    <DrawerItemIcon
+                      icon="grid"
+                      isActive={
+                        activeKey === 'dashboard' ||
+                        activeKey === 'dashboard-kasir'
+                      }
+                    />
+                    <span>Dashboard Kasir</span>
+                  </Link>
+
+                  <Link
+                    href="/kasir/daftar"
+                    onClick={onClose}
+                    className={`flex items-center gap-3.5 px-3.5 py-3 rounded-full text-[14.5px] transition-colors ${
+                      activeKey === 'daftar-pesanan'
+                        ? 'bg-[#FBE9E7] text-[#C62828] font-bold'
+                        : 'text-[#262626] font-medium hover:bg-zinc-50'
+                    }`}
+                  >
+                    <DrawerItemIcon
+                      icon="list"
+                      isActive={activeKey === 'daftar-pesanan'}
+                    />
+                    <span>Daftar Pesanan</span>
+                  </Link>
+                </>
+              )}
             </nav>
           </div>
 

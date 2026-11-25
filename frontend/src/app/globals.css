@@ -36,3 +36,18 @@ input::placeholder,
 textarea::placeholder {
   color: #9ca3af !important;
 }
+
+input:not([type='checkbox']):not([type='radio']),
+textarea,
+select {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+  opacity: 1 !important;
+}
+
+input:not([type='checkbox']):not([type='radio'])::placeholder,
+textarea::placeholder {
+  color: #7a6a68 !important;
+  -webkit-text-fill-color: #7a6a68 !important;
+  opacity: 1 !important;
+}
