@@ -33,17 +33,23 @@ async function RingkasanPageContent({ searchParams }: RingkasanPageProps) {
 
   const parsedType: OrderType =
     resolvedParams.jenis === 'takeaway' ? 'takeaway' : 'dine_in'
-  const rawNomor = resolvedParams.nomor?.trim() || 'A-0012'
-  const formattedOrderNumber = rawNomor.toLowerCase().startsWith('no.')
-    ? rawNomor
-    : `No. ${rawNomor}`
+  const rawNomor = resolvedParams.nomor?.trim()
+  const formattedOrderNumber = rawNomor
+    ? rawNomor.toLowerCase().startsWith('no.')
+      ? rawNomor
+      : `No. ${rawNomor}`
+    : undefined
+  const tableNumber =
+    parsedType === 'dine_in' && resolvedParams.meja?.trim()
+      ? resolvedParams.meja.trim()
+      : undefined
 
   return (
     <KasirAccessGuard role="kasir-or-admin">
       <RingkasanPesananView
         orderNumber={formattedOrderNumber}
         orderType={parsedType}
-        tableNumber={resolvedParams.meja?.trim() || '5'}
+        tableNumber={tableNumber}
         rawItemsParam={resolvedParams.items}
       />
     </KasirAccessGuard>

@@ -1,9 +1,10 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
+import { daftarPesanan, batalkanAtauRefundPesanan } from '@/lib/api/kasir'
 import MobileAdminDrawer from '@/components/layout/mobile-admin-drawer'
 import type { OrderType } from '@/features/kasir/input-pesanan-view'
 
@@ -18,115 +19,6 @@ export interface DaftarOrderItem {
   status: DaftarOrderStatus
   alasan?: string
   persiapanDimulai?: boolean
-}
-
-const INITIAL_ORDERS: DaftarOrderItem[] = [
-  {
-    nomorPesanan: 'A-0012',
-    jenisPesanan: 'dine_in',
-    nomorMeja: '5',
-    totalHarga: 46000,
-    status: 'Belum Dibayar',
-    persiapanDimulai: false,
-  },
-  {
-    nomorPesanan: 'A-0011',
-    jenisPesanan: 'takeaway',
-    metodePembayaran: 'Tunai',
-    totalHarga: 18000,
-    status: 'Dibayar',
-    persiapanDimulai: false,
-  },
-  {
-    nomorPesanan: 'A-0010',
-    jenisPesanan: 'dine_in',
-    nomorMeja: '2',
-    totalHarga: 32000,
-    status: 'Batal',
-    alasan: 'Pelanggan membatalkan pesanan sebelum dibuat',
-    persiapanDimulai: false,
-  },
-]
-
-function buildInitialOrdersFromStorage(): DaftarOrderItem[] {
-  const updatedOrders = [...INITIAL_ORDERS]
-  if (typeof window === 'undefined') return updatedOrders
-
-  for (let i = 0; i < window.sessionStorage.length; i += 1) {
-    const key = window.sessionStorage.key(i)
-    if (!key || !key.startsWith('bakmie_order_')) continue
-
-    try {
-      const raw = window.sessionStorage.getItem(key)
-      if (!raw) continue
-      const parsed = JSON.parse(raw) as {
-        nomor_pesanan?: string
-        jenis_pesanan?: OrderType
-        nomor_meja?: string | null
-        total_harga?: number
-        status_pesanan?: string
-      }
-
-      const nomor = parsed.nomor_pesanan?.trim()
-      if (!nomor) continue
-
-      const existingIndex = updatedOrders.findIndex(
-        (o) => o.nomorPesanan === nomor,
-      )
-      const mappedOrder: DaftarOrderItem = {
-        nomorPesanan: nomor,
-        jenisPesanan:
-          parsed.jenis_pesanan === 'takeaway' ? 'takeaway' : 'dine_in',
-        nomorMeja: parsed.nomor_meja ?? null,
-        totalHarga: Number(parsed.total_harga ?? 0),
-        status:
-          parsed.status_pesanan === 'dibayar' ? 'Dibayar' : 'Belum Dibayar',
-        persiapanDimulai: false,
-      }
-
-      if (existingIndex >= 0) {
-        updatedOrders[existingIndex] = {
-          ...updatedOrders[existingIndex],
-          ...mappedOrder,
-        }
-      } else {
-        updatedOrders.unshift(mappedOrder)
-      }
-    } catch {
-      // Abaikan entri storage yang tidak valid
-    }
-  }
-
-  for (let i = 0; i < window.sessionStorage.length; i += 1) {
-    const key = window.sessionStorage.key(i)
-    if (!key || !key.startsWith('bakmie_payment_')) continue
-
-    try {
-      const raw = window.sessionStorage.getItem(key)
-      if (!raw) continue
-      const parsed = JSON.parse(raw) as {
-        nomor_pesanan?: string
-        metode_pembayaran?: 'tunai' | 'qris'
-      }
-
-      const nomor = parsed.nomor_pesanan?.trim()
-      if (!nomor) continue
-
-      const idx = updatedOrders.findIndex((o) => o.nomorPesanan === nomor)
-      if (idx >= 0) {
-        updatedOrders[idx] = {
-          ...updatedOrders[idx],
-          status: 'Dibayar',
-          metodePembayaran:
-            parsed.metode_pembayaran === 'qris' ? 'QRIS' : 'Tunai',
-        }
-      }
-    } catch {
-      // Abaikan entri storage yang tidak valid
-    }
-  }
-
-  return updatedOrders
 }
 
 function formatRupiah(amount: number): string {
@@ -155,9 +47,9 @@ export default function DaftarPesananView({
 }) {
   const router = useRouter()
 
-  const [orders, setOrders] = useState<DaftarOrderItem[]>(() =>
-    buildInitialOrdersFromStorage(),
-  )
+  const [orders, setOrders] = useState<DaftarOrderItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [activeFilter, setActiveFilter] = useState<
     'Semua' | 'Belum' | 'Dibayar' | 'Batal' | 'Refund'
   >('Semua')
@@ -169,6 +61,45 @@ export default function DaftarPesananView({
 
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
+
+  useEffect(() => {
+    loadOrders()
+  }, [])
+
+  async function loadOrders() {
+    setLoading(true)
+    setError(null)
+    try {
+      const data = await daftarPesanan()
+      const mapped: DaftarOrderItem[] = (data ?? []).map((p: any) => ({
+        nomorPesanan: p.nomor_pesanan,
+        jenisPesanan: p.jenis_pesanan === 'takeaway' ? 'takeaway' : 'dine_in',
+        nomorMeja: p.nomor_meja ?? null,
+        totalHarga: Number(p.total_harga ?? 0),
+        status:
+          p.status_pesanan === 'dibayar'
+            ? 'Dibayar'
+            : p.status_pesanan === 'batal'
+              ? 'Batal'
+              : p.status_pesanan === 'refund'
+                ? 'Refund'
+                : 'Belum Dibayar',
+        alasan: p.catatan_khusus ?? undefined,
+        persiapanDimulai: false,
+        metodePembayaran:
+          p.pembayaran?.[0]?.metode_pembayaran === 'qris'
+            ? 'QRIS'
+            : p.pembayaran?.[0]?.metode_pembayaran === 'tunai'
+              ? 'Tunai'
+              : undefined,
+      }))
+      setOrders(mapped)
+    } catch (err: any) {
+      setError(err.message || 'Gagal memuat daftar pesanan.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
@@ -193,66 +124,107 @@ export default function DaftarPesananView({
     router.push(`/kasir/pembayaran?${params.toString()}`)
   }
 
-  function handleCancelOrder(order: DaftarOrderItem) {
-    const trimmedReason = reasonText.trim()
-    if (!trimmedReason) {
-      setErrorMessage(
-        'Alasan pembatalan / refund wajib diisi terlebih dahulu.',
-      )
-      setInfoMessage(null)
-      return
-    }
+  const handleCancelOrder = useCallback(
+    async (order: DaftarOrderItem) => {
+      const trimmedReason = reasonText.trim()
+      if (!trimmedReason) {
+        setErrorMessage(
+          'Alasan pembatalan / refund wajib diisi terlebih dahulu.',
+        )
+        setInfoMessage(null)
+        return
+      }
 
-    setErrorMessage(null)
-    setOrders((prev) =>
-      prev.map((item) =>
-        item.nomorPesanan === order.nomorPesanan
-          ? { ...item, status: 'Batal', alasan: trimmedReason }
-          : item,
-      ),
-    )
-    setReasonText('')
-    setInfoMessage(
-      `Pesanan ${order.nomorPesanan} dibatalkan (kuota tidak berubah).`,
-    )
-  }
+      setErrorMessage(null)
 
-  function handleRefundOrder(order: DaftarOrderItem) {
-    const trimmedReason = reasonText.trim()
-    if (!trimmedReason) {
-      setErrorMessage(
-        'Alasan pembatalan / refund wajib diisi terlebih dahulu.',
-      )
-      setInfoMessage(null)
-      return
-    }
+      try {
+        await batalkanAtauRefundPesanan({
+          id_pesanan: order.nomorPesanan,
+          aksi: 'batal',
+          alasan: trimmedReason,
+        })
 
-    setErrorMessage(null)
-    setOrders((prev) =>
-      prev.map((item) =>
-        item.nomorPesanan === order.nomorPesanan
-          ? {
-              ...item,
-              status: 'Refund',
-              alasan: trimmedReason,
-              persiapanDimulai,
-            }
-          : item,
-      ),
-    )
-    setReasonText('')
-    setInfoMessage(
-      persiapanDimulai
-        ? `Refund pesanan ${order.nomorPesanan} dicatat (kuota tidak dikembalikan karena persiapan sudah dimulai).`
-        : `Refund pesanan ${order.nomorPesanan} dicatat dan kuota porsi dikembalikan.`,
-    )
-  }
+        setOrders((prev) =>
+          prev.map((item) =>
+            item.nomorPesanan === order.nomorPesanan
+              ? { ...item, status: 'Batal', alasan: trimmedReason }
+              : item,
+          ),
+        )
+        setReasonText('')
+        setInfoMessage(
+          `Pesanan ${order.nomorPesanan} dibatalkan (kuota tidak berubah).`,
+        )
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Gagal membatalkan pesanan.')
+      }
+    },
+    [reasonText],
+  )
+
+  const handleRefundOrder = useCallback(
+    async (order: DaftarOrderItem) => {
+      const trimmedReason = reasonText.trim()
+      if (!trimmedReason) {
+        setErrorMessage(
+          'Alasan pembatalan / refund wajib diisi terlebih dahulu.',
+        )
+        setInfoMessage(null)
+        return
+      }
+
+      setErrorMessage(null)
+
+      try {
+        await batalkanAtauRefundPesanan({
+          id_pesanan: order.nomorPesanan,
+          aksi: 'refund',
+          alasan: trimmedReason,
+          persiapan_dimulai: persiapanDimulai,
+        })
+
+        const kuotaDikembalikan = !persiapanDimulai
+
+        setOrders((prev) =>
+          prev.map((item) =>
+            item.nomorPesanan === order.nomorPesanan
+              ? {
+                  ...item,
+                  status: 'Refund',
+                  alasan: trimmedReason,
+                  persiapanDimulai,
+                }
+              : item,
+          ),
+        )
+        setReasonText('')
+        setInfoMessage(
+          kuotaDikembalikan
+            ? `Refund pesanan ${order.nomorPesanan} dicatat dan kuota porsi dikembalikan.`
+            : `Refund pesanan ${order.nomorPesanan} dicatat (kuota tidak dikembalikan karena persiapan sudah dimulai).`,
+        )
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Gagal memproses refund.')
+      }
+    },
+    [reasonText, persiapanDimulai],
+  )
 
   async function handleLogout() {
     setSigningOut(true)
     await signOut()
     router.replace('/auth/login')
   }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#F9F7F6] p-4 flex items-center justify-center">
+        <p className="text-zinc-600">Memuat daftar pesanan…</p>
+      </div>
+    )
+  }
+
+  // Error akan ditampilkan di dalam form di bawah hero section
 
   return (
     <div className="min-h-screen bg-[#F9F7F6] flex justify-center">
@@ -294,11 +266,11 @@ export default function DaftarPesananView({
             <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
               <circle cx="16" cy="11" r="5" fill="#F3C6A5" />
               <path
-                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 7.8 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
+                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
                 fill="#1F2933"
               />
               <path
-                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 22.4 25 27"
+                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 27"
                 fill="#1E293B"
               />
               <path d="M14.5 19.5L16 24L17.5 19.5H14.5Z" fill="#FFFFFF" />
@@ -316,6 +288,11 @@ export default function DaftarPesananView({
           </p>
         </section>
 
+        {error && (
+          <div className="p-4 mb-2 rounded-lg bg-red-50 border border-red-200">
+            <p className="text-sm font-semibold text-red-800">{error}</p>
+          </div>
+        )}
         {/* Konten Utama Daftar Pesanan */}
         <main className="px-4 pt-4 space-y-3.5 flex-1">
           {/* Filter Pills */}

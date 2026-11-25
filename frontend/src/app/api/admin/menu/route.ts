@@ -68,20 +68,27 @@ export async function POST(request: Request) {
 
     const admin = createAdminClient()
 
-    const { error } = await admin.from('menu').insert({
-      id_kategori,
-      nama_menu: nama_menu.trim(),
-      harga: Number(harga),
-      kuota_default: Number(kuota_default),
-      ambang_default: Number(ambang_default),
-      status_aktif: status_aktif !== false,
-    })
+    const { data: createdMenu, error } = await admin
+      .from('menu')
+      .insert({
+        id_kategori,
+        nama_menu: nama_menu.trim(),
+        harga: Number(harga),
+        kuota_default: Number(kuota_default),
+        ambang_default: Number(ambang_default),
+        status_aktif: status_aktif !== false,
+      })
+      .select()
+      .single()
 
     if (error) {
       return NextResponseError('Gagal menyimpan menu.', 500)
     }
 
-    return Response.json({ message: 'Menu berhasil ditambahkan.' }, { status: 201 })
+    return Response.json(
+      { message: 'Menu berhasil ditambahkan.', menu: createdMenu },
+      { status: 201 },
+    )
   } catch {
     return NextResponseError('Terjadi kesalahan saat menambahkan menu.', 500)
   }

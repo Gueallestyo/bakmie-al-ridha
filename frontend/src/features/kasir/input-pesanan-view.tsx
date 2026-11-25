@@ -1,9 +1,11 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
+import { buatPesanan } from '@/lib/api/kasir'
+import { daftarMenu } from '@/lib/api/admin'
 import MobileAdminDrawer from '@/components/layout/mobile-admin-drawer'
 
 export type OrderType = 'dine_in' | 'takeaway'
@@ -12,50 +14,11 @@ export interface KasirMenuItem {
   id: string
   nama: string
   harga: number
-  kategori: 'Mie' | 'Minuman'
+  kategori: string
   sisaKuota: number
   ambangPeringatan: number
   iconKind: 'noodle' | 'drink'
 }
-
-const INITIAL_KASIR_MENUS: KasirMenuItem[] = [
-  {
-    id: 'm-1',
-    nama: 'Bakmie Ayam',
-    harga: 15000,
-    kategori: 'Mie',
-    sisaKuota: 24,
-    ambangPeringatan: 10,
-    iconKind: 'noodle',
-  },
-  {
-    id: 'm-2',
-    nama: 'Bakmie Ayam Bakso',
-    harga: 18000,
-    kategori: 'Mie',
-    sisaKuota: 4,
-    ambangPeringatan: 5,
-    iconKind: 'noodle',
-  },
-  {
-    id: 'm-3',
-    nama: 'Bakmie Pangsit',
-    harga: 17000,
-    kategori: 'Mie',
-    sisaKuota: 0,
-    ambangPeringatan: 5,
-    iconKind: 'noodle',
-  },
-  {
-    id: 'm-4',
-    nama: 'Es Teh Manis',
-    harga: 5000,
-    kategori: 'Minuman',
-    sisaKuota: 40,
-    ambangPeringatan: 8,
-    iconKind: 'drink',
-  },
-]
 
 function formatRupiah(amount: number): string {
   return `Rp${amount.toLocaleString('id-ID')}`
@@ -179,9 +142,11 @@ export default function InputPesananView({
   userRole?: 'admin' | 'kasir'
 }) {
   const router = useRouter()
-  const [menus] = useState<KasirMenuItem[]>(INITIAL_KASIR_MENUS)
+  const [menus, setMenus] = useState<KasirMenuItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [orderType, setOrderType] = useState<OrderType>('dine_in')
-  const [tableNumber, setTableNumber] = useState<string>('5')
+  const [tableNumber, setTableNumber] = useState<string>('')
   const [editingOrderContext, setEditingOrderContext] = useState(false)
 
   const [searchQuery, setSearchQuery] = useState('')
@@ -189,13 +154,61 @@ export default function InputPesananView({
     'Semua' | 'Mie' | 'Minuman' | 'Dine-in'
   >('Semua')
 
-  const [quantities, setQuantities] = useState<Record<string, number>>({
-    'm-1': 2,
-    'm-4': 2,
-  })
+  const [quantities, setQuantities] = useState<Record<string, number>>({})
 
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
+
+  useEffect(() => {
+    loadMenus()
+  }, [])
+
+  async function loadMenus() {
+    setLoading(true)
+    setError(null)
+    try {
+      const menuRows = await daftarMenu()
+      const today = new Date().toISOString().split('T')[0]
+
+      // Ambil kuota harian untuk hari ini dari API admin
+      const kuotaRes = await fetch('/api/admin/kuota', {
+        headers: { 'Content-Type': 'application/json' },
+      })
+      const kuotaJson = await kuotaRes.json()
+      const kuotaList = kuotaJson.kuota ?? []
+
+      const mapped: KasirMenuItem[] = menuRows.map((row: any) => {
+        const kuotaHariIni = kuotaList.find(
+          (k: any) => k.id_menu === row.id_menu && k.tanggal === today,
+        )
+        const sisaKuota = kuotaHariIni
+          ? Number(kuotaHariIni.sisa_porsi)
+          : Number(row.kuota_default)
+        const ambang = kuotaHariIni
+          ? Number(kuotaHariIni.ambang_peringatan)
+          : Number(row.ambang_default)
+
+        return {
+          id: row.id_menu,
+          nama: row.nama_menu,
+          harga: Number(row.harga),
+          kategori: row.kategori?.nama_kategori ?? 'Lainnya',
+          sisaKuota: sisaKuota,
+          ambangPeringatan: ambang,
+          iconKind:
+            row.kategori?.nama_kategori?.toLowerCase() === 'minuman'
+              ? 'drink'
+              : 'noodle',
+        }
+      })
+
+      setMenus(mapped)
+    } catch (err: any) {
+      setError(err.message || 'Gagal memuat daftar menu.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const filteredMenus = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
@@ -235,21 +248,51 @@ export default function InputPesananView({
     })
   }
 
-  function handleLihatPesanan() {
+  const handleSimpanPesanan = useCallback(async () => {
     if (cartSummary.totalPortions <= 0) return
-    const params = new URLSearchParams({
-      jenis: orderType,
-      ...(orderType === 'dine_in' && tableNumber.trim()
-        ? { meja: tableNumber.trim() }
-        : {}),
-      items: JSON.stringify(
-        Object.entries(quantities)
-          .filter(([, qty]) => qty > 0)
-          .map(([menuId, qty]) => ({ menuId, qty })),
-      ),
-    })
-    router.push(`/kasir/ringkasan?${params.toString()}`)
-  }
+
+    const items = Object.entries(quantities)
+      .filter(([, qty]) => qty > 0)
+      .map(([menuId, qty]) => {
+        const item = menus.find((m) => m.id === menuId)
+        if (!item) return null
+        return {
+          id_menu: item.id,
+          jumlah: qty,
+          harga_satuan: item.harga,
+          subtotal: item.harga * qty,
+        }
+      })
+      .filter(Boolean)
+
+    if (!items || items.length === 0) return
+
+    const payload = {
+      jenis_pesanan: orderType,
+      nomor_meja:
+        orderType === 'dine_in' && tableNumber.trim()
+          ? tableNumber.trim()
+          : null,
+      items,
+      catatan_khusus: null,
+      total_harga: cartSummary.totalAmount,
+    }
+
+    try {
+      const result = await buatPesanan(payload as any)
+      const params = new URLSearchParams({
+        nomor: result.pesanan.nomor_pesanan,
+        total: String(cartSummary.totalAmount),
+        jenis: orderType,
+        ...(orderType === 'dine_in' && tableNumber.trim()
+          ? { meja: tableNumber.trim() }
+          : {}),
+      })
+      router.push(`/kasir/ringkasan?${params.toString()}`)
+    } catch (err: any) {
+      setError(err.message || 'Gagal menyimpan pesanan.')
+    }
+  }, [cartSummary, orderType, tableNumber, menus, quantities, router])
 
   async function handleLogout() {
     setSigningOut(true)
@@ -261,6 +304,16 @@ export default function InputPesananView({
     orderType === 'dine_in'
       ? `Kasir· Dine In ·Meja ${tableNumber.trim() || '-'}`
       : 'Kasir· Takeaway'
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-zinc-50 p-4 flex items-center justify-center">
+        <p className="text-zinc-600">Memuat menu…</p>
+      </div>
+    )
+  }
+
+  // Error ditampilkan di dalam form, bukan layar penuh
 
   return (
     <div className="min-h-screen bg-[#F9F7F6] flex justify-center">
@@ -302,11 +355,11 @@ export default function InputPesananView({
             <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
               <circle cx="16" cy="11" r="5" fill="#F3C6A5" />
               <path
-                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 7.8 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
+                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
                 fill="#1F2933"
               />
               <path
-                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 22.4 25 27"
+                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 27"
                 fill="#1E293B"
               />
               <path d="M14.5 19.5L16 24L17.5 19.5H14.5Z" fill="#FFFFFF" />
@@ -314,6 +367,11 @@ export default function InputPesananView({
           </button>
         </header>
 
+        {error && (
+          <div className="p-4 mb-2 rounded-lg bg-red-50 border border-red-200">
+            <p className="text-sm font-semibold text-red-800">{error}</p>
+          </div>
+        )}
         {/* Hero Merah Gradasi */}
         <section className="bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] px-5 pt-5 pb-7 rounded-b-[28px] text-white shadow-sm">
           <div className="flex items-start justify-between gap-2">
@@ -509,7 +567,7 @@ export default function InputPesananView({
         <div className="fixed bottom-16 w-full max-w-[430px] px-3.5 pb-2 pt-1 z-20 pointer-events-none">
           <button
             type="button"
-            onClick={handleLihatPesanan}
+            onClick={handleSimpanPesanan}
             disabled={cartSummary.totalPortions <= 0}
             className="pointer-events-auto w-full rounded-2xl bg-gradient-to-r from-[#C92A2A] via-[#B2181B] to-[#8C1317] px-4 py-3 text-white shadow-lg flex items-center justify-between gap-3 disabled:opacity-60 hover:opacity-98 transition-opacity"
           >

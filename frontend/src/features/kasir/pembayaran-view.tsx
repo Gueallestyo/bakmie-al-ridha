@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
+import { validasiPembayaran } from '@/lib/api/kasir'
 import MobileAdminDrawer from '@/components/layout/mobile-admin-drawer'
 import type { OrderType } from '@/features/kasir/input-pesanan-view'
 
@@ -13,14 +14,14 @@ interface PembayaranViewProps {
   orderNumber?: string
   totalAmount?: number
   orderType?: OrderType
-  tableNumber?: string
+  tableNumber?: string | null
   initialStatus?: 'Belum Dibayar' | 'Dibayar'
   userRole?: 'admin' | 'kasir'
   onBack?: () => void
   onValidated?: (payload: {
     orderNumber: string
     method: PaymentMethod
-    cashReceived: number
+    cashReceived: number | null
     changeAmount: number
   }) => void
 }
@@ -35,10 +36,10 @@ function parseRupiahInput(raw: string): number {
 }
 
 export default function PembayaranView({
-  orderNumber = 'No. A-0012',
-  totalAmount = 46000,
+  orderNumber = '',
+  totalAmount = 0,
   orderType = 'dine_in',
-  tableNumber = '5',
+  tableNumber,
   initialStatus = 'Belum Dibayar',
   userRole = 'admin',
   onBack,
@@ -47,13 +48,16 @@ export default function PembayaranView({
   const router = useRouter()
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('tunai')
-  const [cashInput, setCashInput] = useState<string>(formatRupiah(50000))
+  const [cashInput, setCashInput] = useState<string>(
+    totalAmount > 0 ? formatRupiah(totalAmount) : formatRupiah(50000),
+  )
   const [paymentStatus, setPaymentStatus] = useState<'Belum Dibayar' | 'Dibayar'>(
     initialStatus,
   )
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [infoMessage, setInfoMessage] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [qrisConfirmed, setQrisConfirmed] = useState(false)
 
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
@@ -62,12 +66,12 @@ export default function PembayaranView({
 
   const changeAmount = useMemo(() => {
     if (paymentMethod !== 'tunai') return 0
-    return Math.max(0, cashReceived - totalAmount)
+    return Math.max(0, cashReceived - (totalAmount || 0))
   }, [paymentMethod, cashReceived, totalAmount])
 
   const orderContextLabel =
     orderType === 'dine_in'
-      ? `Dine-in · Meja ${tableNumber.trim() || '-'}`
+      ? `Dine-in · Meja ${tableNumber?.trim() || '-'}`
       : 'Takeaway'
 
   function handleCashChange(value: string) {
@@ -84,10 +88,22 @@ export default function PembayaranView({
     router.back()
   }
 
-  function handleValidatePayment() {
+  async function handleValidatePayment() {
     if (submitting) return
+    if (paymentStatus === 'Dibayar') return
+    if (!orderNumber || !totalAmount) {
+      setErrorMessage('Data pesanan tidak lengkap.')
+      return
+    }
     setErrorMessage(null)
     setInfoMessage(null)
+
+    if (paymentMethod === 'qris' && !qrisConfirmed) {
+      setErrorMessage(
+        'Konfirmasi terlebih dahulu bahwa dana QRIS sudah diterima.',
+      )
+      return
+    }
 
     if (paymentMethod === 'tunai' && cashReceived < totalAmount) {
       setErrorMessage(
@@ -97,40 +113,44 @@ export default function PembayaranView({
     }
 
     setSubmitting(true)
-    const cleanOrderId = orderNumber.replace(/^No\.\s*/i, '').trim() || 'A-0012'
 
-    if (typeof window !== 'undefined') {
-      window.sessionStorage.setItem(
-        `bakmie_payment_${cleanOrderId}`,
-        JSON.stringify({
-          nomor_pesanan: cleanOrderId,
-          metode_pembayaran: paymentMethod,
-          uang_diterima: paymentMethod === 'tunai' ? cashReceived : totalAmount,
-          kembalian: paymentMethod === 'tunai' ? changeAmount : 0,
-          status_pesanan: 'dibayar',
-          validated_at: new Date().toISOString(),
-        }),
-      )
-    }
+    const cleanOrderId = orderNumber.replace(/^No\.\s*/i, '').trim()
 
-    setPaymentStatus('Dibayar')
+    const uangDiterima =
+      paymentMethod === 'tunai' ? cashReceived : null
+    const kembalian =
+      paymentMethod === 'tunai' ? changeAmount : 0
 
-    if (onValidated) {
-      onValidated({
-        orderNumber: cleanOrderId,
-        method: paymentMethod,
-        cashReceived: paymentMethod === 'tunai' ? cashReceived : totalAmount,
-        changeAmount,
+    try {
+      const result = await validasiPembayaran({
+        id_pesanan: cleanOrderId,
+        metode_pembayaran: paymentMethod,
+        uang_diterima: uangDiterima,
+        jumlah_dibayar: totalAmount,
       })
-      setSubmitting(false)
-      return
-    }
 
-    setInfoMessage(
-      `Pembayaran ${orderNumber} (${paymentMethod.toUpperCase()}) divalidasi. Kuota porsi diperbarui.`,
-    )
-    setSubmitting(false)
-    router.push(`/kasir/daftar?nomor=${encodeURIComponent(cleanOrderId)}`)
+      setPaymentStatus('Dibayar')
+
+      if (onValidated) {
+        onValidated({
+          orderNumber: cleanOrderId,
+          method: paymentMethod,
+          cashReceived: uangDiterima,
+          changeAmount: kembalian,
+        })
+        setSubmitting(false)
+        return
+      }
+
+      setInfoMessage(
+        `Pembayaran ${orderNumber} (${paymentMethod.toUpperCase()}) divalidasi. Kuota porsi diperbarui.`,
+      )
+      setSubmitting(false)
+      router.push(`/kasir/daftar?nomor=${encodeURIComponent(cleanOrderId)}`)
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Gagal memvalidasi pembayaran.')
+      setSubmitting(false)
+    }
   }
 
   async function handleLogout() {
@@ -179,11 +199,11 @@ export default function PembayaranView({
             <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
               <circle cx="16" cy="11" r="5" fill="#F3C6A5" />
               <path
-                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 7.8 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
+                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
                 fill="#1F2933"
               />
               <path
-                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 22.4 25 27"
+                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 27"
                 fill="#1E293B"
               />
               <path d="M14.5 19.5L16 24L17.5 19.5H14.5Z" fill="#FFFFFF" />
@@ -249,7 +269,7 @@ export default function PembayaranView({
             </div>
 
             <p className="relative text-[32px] font-extrabold tracking-tight mt-2 leading-none tabular-nums">
-              {formatRupiah(totalAmount)}
+              {formatRupiah(totalAmount || 0)}
             </p>
 
             <p className="relative text-[12px] text-red-100/85 mt-3 font-medium">
@@ -367,10 +387,19 @@ export default function PembayaranView({
               <p className="text-[12px] text-[#7A6A68] leading-relaxed">
                 Pastikan dana masuk sebesar{' '}
                 <span className="font-bold text-zinc-900">
-                  {formatRupiah(totalAmount)}
+                  {formatRupiah(totalAmount || 0)}
                 </span>{' '}
                 telah diterima sebelum menekan Validasi Pembayaran.
               </p>
+              <label className="flex items-center gap-2 text-[11.5px] text-[#6E6564] cursor-pointer select-none mt-2">
+                <input
+                  type="checkbox"
+                  checked={qrisConfirmed}
+                  onChange={(e) => setQrisConfirmed(e.target.checked)}
+                  className="rounded border-[#EAD7D5] text-[#C62828] focus:ring-[#C62828]"
+                />
+                <span>Saya telah menerima dana QRIS dari pelanggan</span>
+              </label>
             </div>
           )}
 
@@ -391,7 +420,11 @@ export default function PembayaranView({
             <button
               type="button"
               onClick={handleValidatePayment}
-              disabled={submitting}
+              disabled={
+                submitting ||
+                (paymentMethod === 'qris' && !qrisConfirmed) ||
+                paymentStatus === 'Dibayar'
+              }
               className="w-full h-12 rounded-full bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] text-white text-[14.5px] font-bold shadow-md hover:opacity-95 disabled:opacity-60 transition-opacity flex items-center justify-center"
             >
               {submitting ? 'Memvalidasi...' : 'Validasi Pembayaran'}

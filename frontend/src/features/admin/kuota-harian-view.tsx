@@ -1,42 +1,28 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
+import {
+  daftarKuotaHarian,
+  buatKuotaHarian,
+  ubahKuotaHarian,
+} from '@/lib/api/admin'
 import MobileAdminDrawer from '@/components/layout/mobile-admin-drawer'
 
 export interface DailyQuotaItem {
   id: string
+  id_menu: string
   nama: string
   sisa: number
   kuota: number
   ambang: number
 }
 
-const INITIAL_QUOTA_ITEMS: DailyQuotaItem[] = [
-  {
-    id: 'q-1',
-    nama: 'Bakmie Ayam',
-    sisa: 24,
-    kuota: 60,
-    ambang: 10,
-  },
-  {
-    id: 'q-2',
-    nama: 'Bakmie Ayam Bakso',
-    sisa: 4,
-    kuota: 30,
-    ambang: 5,
-  },
-  {
-    id: 'q-3',
-    nama: 'Bakmie Pangsit',
-    sisa: 0,
-    kuota: 30,
-    ambang: 5,
-  },
-]
+function formatRupiah(amount: number): string {
+  return `Rp${amount.toLocaleString('id-ID')}`
+}
 
 function getQuotaStatus(item: DailyQuotaItem): {
   label: string
@@ -75,54 +61,89 @@ function getQuotaStatus(item: DailyQuotaItem): {
 
 export default function KuotaHarianView() {
   const router = useRouter()
-  const [items, setItems] = useState<DailyQuotaItem[]>(INITIAL_QUOTA_ITEMS)
-  const [selectedId, setSelectedId] = useState<string>(INITIAL_QUOTA_ITEMS[0].id)
+  const [items, setItems] = useState<DailyQuotaItem[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const activeItem =
-    items.find((item) => item.id === selectedId) ?? items[0]
-
-  const [kuotaInput, setKuotaInput] = useState<string>(
-    String(INITIAL_QUOTA_ITEMS[0].kuota),
-  )
-  const [ambangInput, setAmbangInput] = useState<string>(
-    String(INITIAL_QUOTA_ITEMS[0].ambang),
-  )
+  const [kuotaInput, setKuotaInput] = useState<string>('')
+  const [ambangInput, setAmbangInput] = useState<string>('')
   const [savedNotice, setSavedNotice] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
 
-  function handleSelectItem(item: DailyQuotaItem) {
-    setSelectedId(item.id)
-    setKuotaInput(String(item.kuota))
-    setAmbangInput(String(item.ambang))
-    setSavedNotice(null)
+  useEffect(() => {
+    loadKuota()
+  }, [])
+
+  async function loadKuota() {
+    setLoading(true)
+    setError(null)
+    try {
+      const data = await daftarKuotaHarian()
+      const mapped: DailyQuotaItem[] = data.map((k) => ({
+        id: k.id_kuota,
+        id_menu: k.id_menu,
+        nama: k.menu?.nama_menu ?? k.menu?.nama_kategori ?? 'Menu',
+        sisa: Number(k.sisa_porsi),
+        kuota: Number(k.kuota_awal),
+        ambang: Number(k.ambang_peringatan),
+      }))
+      setItems(mapped)
+      if (mapped.length > 0) {
+        setSelectedId(mapped[0].id)
+      }
+    } catch (err: any) {
+      setError(err.message || 'Gagal memuat data kuota.')
+    } finally {
+      setLoading(false)
+    }
   }
 
-  function handleSaveQuota(e: React.FormEvent) {
+  const activeItem =
+    items.find((item) => item.id === selectedId) ?? null
+
+  useEffect(() => {
+    if (activeItem) {
+      setKuotaInput(String(activeItem.kuota))
+      setAmbangInput(String(activeItem.ambang))
+      setSavedNotice(null)
+    }
+  }, [activeItem, kuotaInput, ambangInput, savedNotice])
+
+  async function handleSaveQuota(e: React.FormEvent) {
     e.preventDefault()
     if (!activeItem) return
 
     const nextKuota = Math.max(0, Number(kuotaInput) || 0)
     const nextAmbang = Math.max(0, Number(ambangInput) || 0)
-    const selisihKuota = nextKuota - activeItem.kuota
-    const nextSisa = Math.max(0, Math.min(nextKuota, activeItem.sisa + selisihKuota))
 
-    setItems((prev) =>
-      prev.map((row) =>
-        row.id === activeItem.id
-          ? {
-              ...row,
-              kuota: nextKuota,
-              sisa: nextSisa,
-              ambang: nextAmbang,
-            }
-          : row,
-      ),
-    )
+    if (nextAmbang > nextKuota) {
+      setError('Ambang peringatan tidak boleh melebihi kuota awal.')
+      return
+    }
 
-    setKuotaInput(String(nextKuota))
-    setAmbangInput(String(nextAmbang))
-    setSavedNotice(`Kuota ${activeItem.nama} diperbarui (${nextSisa}/${nextKuota}).`)
+    try {
+      await ubahKuotaHarian({
+        id_kuota: activeItem.id,
+        kuota_awal: nextKuota,
+        ambang_peringatan: nextAmbang,
+      })
+
+      setItems((prev) =>
+        prev.map((row) =>
+          row.id === activeItem!.id
+            ? { ...row, kuota: nextKuota, ambang: nextAmbang }
+            : row,
+        ),
+      )
+
+      setKuotaInput(String(nextKuota))
+      setAmbangInput(String(nextAmbang))
+      setSavedNotice(`Kuota ${activeItem!.nama} diperbarui.`)
+    } catch (err: any) {
+      setError(err.message || 'Gagal menyimpan kuota.')
+    }
   }
 
   async function handleLogout() {
@@ -131,11 +152,34 @@ export default function KuotaHarianView() {
     router.replace('/auth/login')
   }
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#F9F7F6] p-4 flex items-center justify-center">
+        <p className="text-zinc-600">Memuat data kuota…</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-zinc-50 p-4 flex items-center justify-center">
+        <div className="max-w-md w-full bg-white p-6 rounded-xl shadow-sm border border-zinc-200 text-center">
+          <h1 className="text-xl font-bold text-zinc-900">Gagal Memuat</h1>
+          <p className="text-zinc-600 mt-2">{error}</p>
+          <button
+            onClick={() => loadKuota()}
+            className="mt-4 px-4 py-2 border border-red-200 rounded-lg text-red-700 hover:bg-red-50 transition-colors"
+          >
+            Coba Lagi
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-[#F9F7F6] flex justify-center">
-      {/* Container Mobile-First (360px - 430px) */}
       <div className="w-full max-w-[430px] min-h-screen bg-white shadow-sm flex flex-col relative pb-36">
-        {/* Top App Bar */}
         <header className="sticky top-0 z-20 bg-white px-4 h-14 flex items-center justify-between border-b border-zinc-100">
           <div className="flex items-center gap-3">
             <button
@@ -172,11 +216,11 @@ export default function KuotaHarianView() {
             <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
               <circle cx="16" cy="11" r="5" fill="#F3C6A5" />
               <path
-                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 7.8 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
+                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
                 fill="#1F2933"
               />
               <path
-                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 22.4 25 27"
+                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 27"
                 fill="#1E293B"
               />
               <path d="M14.5 19.5L16 24L17.5 19.5H14.5Z" fill="#FFFFFF" />
@@ -184,7 +228,6 @@ export default function KuotaHarianView() {
           </button>
         </header>
 
-        {/* Hero Banner Merah Gradasi */}
         <section className="bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] px-5 pt-5 pb-7 rounded-b-[28px] text-white shadow-sm">
           <h1 className="text-[24px] font-bold leading-tight tracking-tight">
             Kuota Harian
@@ -194,20 +237,18 @@ export default function KuotaHarianView() {
           </p>
         </section>
 
-        {/* Form Konten Utama */}
         <form
           id="form-kuota-harian"
           onSubmit={handleSaveQuota}
           className="px-4 pt-5 space-y-3.5 flex-1"
         >
-          {/* Kartu Informasi Tanggal */}
           <div className="rounded-2xl border border-[#F3E2DF] bg-white px-4 py-3.5 flex items-center justify-between gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
             <div>
               <p className="text-[14.5px] font-bold text-zinc-900">
                 Hari ini
               </p>
               <p className="text-[12px] text-[#7A6A68] mt-0.5">
-                Kamis, 12 November 2026
+                {new Date().toLocaleDateString('id-ID')}
               </p>
             </div>
 
@@ -216,21 +257,20 @@ export default function KuotaHarianView() {
             </span>
           </div>
 
-          {/* Daftar Kartu Kuota Menu */}
           {items.map((item) => {
             const status = getQuotaStatus(item)
-            const isSelected = item.id === activeItem?.id
+            const isSelected = item.id === selectedId
 
             return (
               <div
                 key={item.id}
                 role="button"
                 tabIndex={0}
-                onClick={() => handleSelectItem(item)}
+                onClick={() => setSelectedId(item.id)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()
-                    handleSelectItem(item)
+                    setSelectedId(item.id)
                   }
                 }}
                 className={`rounded-2xl bg-white px-4 py-3.5 transition-all cursor-pointer shadow-[0_1px_2px_rgba(0,0,0,0.02)] ${
@@ -250,7 +290,6 @@ export default function KuotaHarianView() {
                   </span>
                 </div>
 
-                {/* Progress Bar Kuota */}
                 <div className="w-full h-1.5 rounded-full bg-[#F1ECEB] overflow-hidden mt-3">
                   <div
                     className={`h-full rounded-full transition-all duration-300 ${status.barClass}`}
@@ -258,7 +297,6 @@ export default function KuotaHarianView() {
                   />
                 </div>
 
-                {/* Info Sisa & Ambang Peringatan */}
                 <div className="flex items-center justify-between gap-2 text-[11.5px] text-[#7A6A68] mt-2">
                   <span>
                     Sisa {item.sisa} dari {item.kuota}
@@ -269,7 +307,6 @@ export default function KuotaHarianView() {
             )
           })}
 
-          {/* Kartu Editor Kuota & Ambang */}
           {activeItem && (
             <div className="rounded-2xl border border-[#F3E2DF] bg-white p-4 space-y-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
               <div className="flex items-center justify-between gap-2">
@@ -334,7 +371,6 @@ export default function KuotaHarianView() {
           )}
         </form>
 
-        {/* Tombol CTA Simpan Kuota di Atas Bottom Bar */}
         <div className="fixed bottom-16 w-full max-w-[430px] px-4 pb-3 pt-2 bg-gradient-to-t from-white via-white to-white/80 z-20">
           <button
             type="submit"
@@ -345,12 +381,10 @@ export default function KuotaHarianView() {
           </button>
         </div>
 
-        {/* Bottom Navigation Bar */}
         <nav
           aria-label="Navigasi Utama Admin"
           className="fixed bottom-0 w-full max-w-[430px] bg-white border-t border-zinc-100 px-6 py-2 flex items-center justify-between z-20"
         >
-          {/* Tab 1: Dashboard */}
           <Link
             href="/admin"
             className="flex flex-col items-center gap-1 text-zinc-600 hover:text-[#C62828] transition-colors"
@@ -373,7 +407,6 @@ export default function KuotaHarianView() {
             <span className="text-[11px] font-medium">Dashboard</span>
           </Link>
 
-          {/* Tab 2: Kelola Data */}
           <Link
             href="/admin/kelola-data"
             className="flex flex-col items-center gap-1 text-zinc-600 hover:text-[#C62828] transition-colors"
@@ -385,7 +418,7 @@ export default function KuotaHarianView() {
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="2"
+                strokeWidth="2.2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               >
@@ -395,7 +428,6 @@ export default function KuotaHarianView() {
             <span className="text-[11px] font-medium">Kelola Data</span>
           </Link>
 
-          {/* Tab 3: Kuota (Aktif) */}
           <Link
             href="/admin/menu"
             className="flex flex-col items-center gap-1 text-[#C62828]"
@@ -407,8 +439,9 @@ export default function KuotaHarianView() {
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="2.2"
+                strokeWidth="2"
                 strokeLinecap="round"
+                strokeLinejoin="round"
               >
                 <line x1="8" y1="6" x2="21" y2="6" />
                 <line x1="8" y1="12" x2="21" y2="12" />
@@ -422,7 +455,6 @@ export default function KuotaHarianView() {
           </Link>
         </nav>
 
-        {/* Drawer Navigasi Samping */}
         <MobileAdminDrawer
           open={drawerOpen}
           activeKey="kuota-harian"

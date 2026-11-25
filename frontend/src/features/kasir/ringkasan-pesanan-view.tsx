@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
+import { buatPesanan } from '@/lib/api/kasir'
 import MobileAdminDrawer from '@/components/layout/mobile-admin-drawer'
 import type { OrderType } from '@/features/kasir/input-pesanan-view'
 
@@ -20,7 +21,7 @@ export interface RingkasanItemInput {
 interface RingkasanPesananViewProps {
   orderNumber?: string
   orderType?: OrderType
-  tableNumber?: string
+  tableNumber?: string | null
   items?: RingkasanItemInput[]
   rawItemsParam?: string
   userRole?: 'admin' | 'kasir'
@@ -56,30 +57,10 @@ const MENU_CATALOG_LOOKUP: Record<
   },
 }
 
-const DEFAULT_RINGKASAN_ITEMS: RingkasanItemInput[] = [
-  {
-    menuId: 'm-1',
-    nama: 'Bakmie Ayam',
-    hargaSatuan: 15000,
-    toppingNama: 'Bakso',
-    hargaTopping: 3000,
-    jumlah: 2,
-    iconKind: 'noodle',
-  },
-  {
-    menuId: 'm-4',
-    nama: 'Es Teh Manis',
-    hargaSatuan: 5000,
-    jumlah: 2,
-    iconKind: 'drink',
-  },
-]
-
 function parseItemsFromQuery(
   rawItemsParam?: string,
-  fallbackItems: RingkasanItemInput[] = DEFAULT_RINGKASAN_ITEMS,
 ): RingkasanItemInput[] {
-  if (!rawItemsParam) return fallbackItems
+  if (!rawItemsParam) return []
 
   try {
     const parsed = JSON.parse(rawItemsParam) as Array<{
@@ -114,7 +95,7 @@ function parseItemsFromQuery(
 
     return mapped
   } catch {
-    return fallbackItems
+    return []
   }
 }
 
@@ -175,9 +156,9 @@ function ItemThumbnail({ kind }: { kind: RingkasanItemInput['iconKind'] }) {
 }
 
 export default function RingkasanPesananView({
-  orderNumber = 'No. A-0012',
+  orderNumber,
   orderType = 'dine_in',
-  tableNumber = '5',
+  tableNumber,
   items,
   rawItemsParam,
   userRole = 'admin',
@@ -185,7 +166,7 @@ export default function RingkasanPesananView({
   onSavedOrder,
 }: RingkasanPesananViewProps) {
   const router = useRouter()
-  const [catatanKhusus, setCatatanKhusus] = useState('Tanpa seledri')
+  const [catatanKhusus, setCatatanKhusus] = useState('')
   const [savingOrder, setSavingOrder] = useState(false)
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -193,7 +174,7 @@ export default function RingkasanPesananView({
 
   const resolvedItems = useMemo(() => {
     if (items && items.length > 0) return items
-    return parseItemsFromQuery(rawItemsParam, DEFAULT_RINGKASAN_ITEMS)
+    return parseItemsFromQuery(rawItemsParam)
   }, [items, rawItemsParam])
 
   const computedRows = useMemo(() => {
@@ -229,7 +210,7 @@ export default function RingkasanPesananView({
     router.push('/kasir')
   }
 
-  function handleSimpanPesanan() {
+  async function handleSimpanPesanan() {
     if (!hasOrderedItems) {
       setFeedbackMessage(
         'Pilih minimal satu menu terlebih dahulu sebelum menyimpan pesanan.',
@@ -241,47 +222,53 @@ export default function RingkasanPesananView({
     setSavingOrder(true)
     setFeedbackMessage(null)
 
-    const cleanOrderId = orderNumber.replace(/^No\.\s*/i, '').trim() || 'A-0012'
-    const payload = {
-      nomor_pesanan: cleanOrderId,
-      jenis_pesanan: orderType,
-      nomor_meja: orderType === 'dine_in' ? tableNumber || null : null,
-      catatan_khusus: catatanKhusus.trim() || null,
-      total_harga: totalPesanan,
-      status_pesanan: 'dibuat',
-      items: computedRows.map((row) => ({
-        menu_id: row.menuId,
-        nama: row.nama,
-        jumlah: row.jumlah,
-        harga_satuan: row.hargaSatuan,
-        harga_topping: row.hargaTopping ?? 0,
-        subtotal: row.subtotal,
-      })),
-    }
+    const cleanOrderId =
+      orderNumber?.replace(/^No\.\s*/i, '').trim() ||
+      `P-${Date.now().toString().slice(-6)}`
 
-    if (typeof window !== 'undefined') {
-      window.sessionStorage.setItem(
-        `bakmie_order_${cleanOrderId}`,
-        JSON.stringify(payload),
-      )
-    }
+    const itemsPayload = computedRows.map((row) => ({
+      id_menu: row.menuId,
+      jumlah: row.jumlah,
+      harga_satuan: row.hargaSatuan,
+      catatan_khusus: null,
+      subtotal: row.subtotal,
+      detail_topping: [],
+    }))
 
-    if (onSavedOrder) {
-      onSavedOrder(cleanOrderId)
+    try {
+      const result = await buatPesanan({
+        jenis_pesanan: orderType,
+        nomor_meja:
+          orderType === 'dine_in' && tableNumber
+            ? tableNumber.trim()
+            : null,
+        items: itemsPayload,
+        catatan_khusus: catatanKhusus.trim() || null,
+        total_harga: totalPesanan,
+      })
+
+      const savedNomor = result.pesanan?.nomor_pesanan || cleanOrderId
+
+      if (onSavedOrder) {
+        onSavedOrder(savedNomor)
+        setSavingOrder(false)
+        return
+      }
+
+      const params = new URLSearchParams({
+        nomor: savedNomor,
+        total: String(totalPesanan),
+        jenis: orderType,
+        ...(orderType === 'dine_in' && tableNumber
+          ? { meja: tableNumber.trim() }
+          : {}),
+      })
+
+      router.push(`/kasir/pembayaran?${params.toString()}`)
+    } catch (err: any) {
+      setFeedbackMessage(err.message || 'Gagal menyimpan pesanan.')
       setSavingOrder(false)
-      return
     }
-
-    const params = new URLSearchParams({
-      nomor: cleanOrderId,
-      total: String(totalPesanan),
-      jenis: orderType,
-      ...(orderType === 'dine_in' && tableNumber.trim()
-        ? { meja: tableNumber.trim() }
-        : {}),
-    })
-
-    router.push(`/kasir/pembayaran?${params.toString()}`)
   }
 
   async function handleLogout() {
@@ -330,11 +317,11 @@ export default function RingkasanPesananView({
             <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
               <circle cx="16" cy="11" r="5" fill="#F3C6A5" />
               <path
-                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 7.8 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
+                d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z"
                 fill="#1F2933"
               />
               <path
-                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 22.4 25 27"
+                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 27"
                 fill="#1E293B"
               />
               <path d="M14.5 19.5L16 24L17.5 19.5H14.5Z" fill="#FFFFFF" />

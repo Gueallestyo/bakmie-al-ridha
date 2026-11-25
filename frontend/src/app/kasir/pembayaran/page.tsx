@@ -33,23 +33,50 @@ async function PembayaranPageContent({ searchParams }: PembayaranPageProps) {
 
   const parsedType: OrderType =
     resolvedParams.jenis === 'takeaway' ? 'takeaway' : 'dine_in'
-  const rawNomor = resolvedParams.nomor?.trim() || 'A-0012'
-  const formattedOrderNumber = rawNomor.toLowerCase().startsWith('no.')
-    ? rawNomor
-    : `No. ${rawNomor}`
-  const parsedTotal = Number(resolvedParams.total ?? 46000)
+  const rawNomor = resolvedParams.nomor?.trim()
+  const formattedOrderNumber = rawNomor
+    ? rawNomor.toLowerCase().startsWith('no.')
+      ? rawNomor
+      : `No. ${rawNomor}`
+    : null
+  const parsedTotal = Number(resolvedParams.total ?? 0)
   const validTotal =
-    Number.isFinite(parsedTotal) && parsedTotal > 0 ? parsedTotal : 46000
+    Number.isFinite(parsedTotal) && parsedTotal > 0 ? parsedTotal : null
+
+  if (!formattedOrderNumber || validTotal === null) {
+    return (
+      <Suspense fallback={<AuthLoading />}>
+        <div className="min-h-screen flex items-center justify-center bg-zinc-50 p-4">
+          <div className="max-w-md w-full bg-white p-8 rounded-xl shadow-sm border border-zinc-200">
+            <h1 className="text-xl font-bold text-zinc-900">
+              Parameter Tidak Valid
+            </h1>
+            <p className="text-zinc-600 mt-2">
+              Nomor pesanan dan total tagihan wajib diisi dengan benar.
+            </p>
+            <a
+              href="/kasir"
+              className="mt-6 inline-block px-4 py-2 border border-red-200 rounded-lg text-red-700 hover:bg-red-50 transition-colors"
+            >
+              Kembali ke Daftar Pesanan
+            </a>
+          </div>
+        </div>
+      </Suspense>
+    )
+  }
 
   return (
-    <KasirAccessGuard role="kasir-or-admin">
-      <PembayaranView
-        orderNumber={formattedOrderNumber}
-        totalAmount={validTotal}
-        orderType={parsedType}
-        tableNumber={resolvedParams.meja?.trim() || '5'}
-      />
-    </KasirAccessGuard>
+    <Suspense fallback={<AuthLoading />}>
+      <KasirAccessGuard role="kasir-or-admin">
+        <PembayaranView
+          orderNumber={formattedOrderNumber}
+          totalAmount={validTotal}
+          orderType={parsedType}
+          tableNumber={resolvedParams.meja?.trim()}
+        />
+      </KasirAccessGuard>
+    </Suspense>
   )
 }
 
