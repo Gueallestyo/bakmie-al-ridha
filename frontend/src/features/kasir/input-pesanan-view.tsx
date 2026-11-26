@@ -1,10 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
-import { buatPesanan } from '@/lib/api/kasir'
 import { daftarMenu } from '@/lib/api/admin'
 import MobileAdminDrawer from '@/components/layout/mobile-admin-drawer'
 
@@ -18,6 +17,12 @@ export interface KasirMenuItem {
   sisaKuota: number
   ambangPeringatan: number
   iconKind: 'noodle' | 'drink'
+}
+
+function getLocalDateString(): string {
+  return new Date().toLocaleDateString('en-CA', {
+    timeZone: 'Asia/Jakarta',
+  })
 }
 
 function formatRupiah(amount: number): string {
@@ -142,9 +147,13 @@ export default function InputPesananView({
   userRole?: 'admin' | 'kasir'
 }) {
   const router = useRouter()
+  const tableInputRef = useRef<HTMLInputElement | null>(null)
+
   const [menus, setMenus] = useState<KasirMenuItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [tableWarning, setTableWarning] = useState<string | null>(null)
   const [orderType, setOrderType] = useState<OrderType>('dine_in')
   const [tableNumber, setTableNumber] = useState<string>('')
   const [editingOrderContext, setEditingOrderContext] = useState(false)
@@ -159,19 +168,17 @@ export default function InputPesananView({
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
 
-  useEffect(() => {
-    loadMenus()
-  }, [])
-
-  async function loadMenus() {
-    setLoading(true)
+  const fetchMenusAndQuota = useCallback(async (showSpinner: boolean) => {
+    if (showSpinner) {
+      setLoading(true)
+    }
     setError(null)
     try {
       const menuRows = await daftarMenu()
-      const today = new Date().toISOString().split('T')[0]
+      const today = getLocalDateString()
 
-      // Ambil kuota harian untuk hari ini dari API admin
       const kuotaRes = await fetch('/api/admin/kuota', {
+        cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
       })
       const kuotaJson = await kuotaRes.json()
@@ -193,7 +200,7 @@ export default function InputPesananView({
           nama: row.nama_menu,
           harga: Number(row.harga),
           kategori: row.kategori?.nama_kategori ?? 'Lainnya',
-          sisaKuota: sisaKuota,
+          sisaKuota,
           ambangPeringatan: ambang,
           iconKind:
             row.kategori?.nama_kategori?.toLowerCase() === 'minuman'
@@ -203,19 +210,79 @@ export default function InputPesananView({
       })
 
       setMenus(mapped)
+      setQuantities((prev) => {
+        const next: Record<string, number> = {}
+        for (const m of mapped) {
+          const currentQty = prev[m.id] ?? 0
+          if (currentQty > 0 && m.sisaKuota > 0) {
+            next[m.id] = Math.min(currentQty, m.sisaKuota)
+          }
+        }
+        return next
+      })
     } catch (err: any) {
       setError(err.message || 'Gagal memuat daftar menu.')
     } finally {
-      setLoading(false)
+      if (showSpinner) {
+        setLoading(false)
+      }
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    setSubmitting(false)
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.removeItem('bakmie_ringkasan_pesanan')
+    }
+    void fetchMenusAndQuota(true)
+  }, [fetchMenusAndQuota])
+
+  useEffect(() => {
+    const handlePageShow = () => {
+      setSubmitting(false)
+      void fetchMenusAndQuota(false)
+    }
+    const handleFocus = () => {
+      void fetchMenusAndQuota(false)
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchMenusAndQuota(false)
+      }
+    }
+
+    window.addEventListener('pageshow', handlePageShow)
+    window.addEventListener('focus', handleFocus)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      window.removeEventListener('pageshow', handlePageShow)
+      window.removeEventListener('focus', handleFocus)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [fetchMenusAndQuota])
+
+  useEffect(() => {
+    if (editingOrderContext && orderType === 'dine_in' && tableWarning) {
+      tableInputRef.current?.focus()
+    }
+  }, [editingOrderContext, orderType, tableWarning])
 
   const filteredMenus = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     return menus.filter((item) => {
-      if (activeFilter === 'Mie' && item.kategori !== 'Mie') return false
-      if (activeFilter === 'Minuman' && item.kategori !== 'Minuman') return false
-      if (activeFilter === 'Dine-in' && orderType !== 'dine_in') return false
+      if (activeFilter === 'Mie' && item.kategori.toLowerCase() !== 'mie') {
+        return false
+      }
+      if (
+        activeFilter === 'Minuman' &&
+        item.kategori.toLowerCase() !== 'minuman'
+      ) {
+        return false
+      }
+      if (activeFilter === 'Dine-in' && orderType !== 'dine_in') {
+        return false
+      }
       if (!q) return true
       return (
         item.nama.toLowerCase().includes(q) ||
@@ -248,62 +315,96 @@ export default function InputPesananView({
     })
   }
 
-  const handleSimpanPesanan = useCallback(async () => {
-    if (cartSummary.totalPortions <= 0) return
+  const handleLanjutRingkasan = useCallback(() => {
+    if (submitting || cartSummary.totalPortions <= 0) return
 
-    const items = Object.entries(quantities)
+    const trimmedTable = tableNumber.trim()
+    if (orderType === 'dine_in' && !trimmedTable) {
+      setTableWarning(
+        'Nomor meja wajib diisi untuk pesanan Dine-in sebelum melihat pesanan.',
+      )
+      setEditingOrderContext(true)
+      setTimeout(() => {
+        tableInputRef.current?.focus()
+      }, 0)
+      return
+    }
+
+    const selectedEntries = Object.entries(quantities)
       .filter(([, qty]) => qty > 0)
       .map(([menuId, qty]) => {
         const item = menus.find((m) => m.id === menuId)
         if (!item) return null
-        return {
-          id_menu: item.id,
-          jumlah: qty,
-          harga_satuan: item.harga,
-          subtotal: item.harga * qty,
-        }
+        return { item, qty }
       })
-      .filter(Boolean)
+      .filter(
+        (entry): entry is { item: KasirMenuItem; qty: number } => Boolean(entry),
+      )
 
-    if (!items || items.length === 0) return
+    if (selectedEntries.length === 0) return
 
-    const payload = {
-      jenis_pesanan: orderType,
-      nomor_meja:
-        orderType === 'dine_in' && tableNumber.trim()
-          ? tableNumber.trim()
-          : null,
-      items,
-      catatan_khusus: null,
-      total_harga: cartSummary.totalAmount,
-    }
+    setSubmitting(true)
+    setError(null)
+    setTableWarning(null)
+
+    const cleanTableNumber = orderType === 'dine_in' ? trimmedTable : null
+
+    const ringkasanItems = selectedEntries.map(({ item, qty }) => ({
+      menuId: item.id,
+      nama: item.nama,
+      hargaSatuan: item.harga,
+      jumlah: qty,
+      iconKind: item.iconKind,
+    }))
 
     try {
-      const result = await buatPesanan(payload as any)
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem(
+          'bakmie_ringkasan_pesanan',
+          JSON.stringify({
+            orderType,
+            tableNumber: cleanTableNumber,
+            items: ringkasanItems,
+          }),
+        )
+      }
+
       const params = new URLSearchParams({
-        nomor: result.pesanan.nomor_pesanan,
         total: String(cartSummary.totalAmount),
         jenis: orderType,
-        ...(orderType === 'dine_in' && tableNumber.trim()
-          ? { meja: tableNumber.trim() }
-          : {}),
+        ...(cleanTableNumber ? { meja: cleanTableNumber } : {}),
+        items: JSON.stringify(ringkasanItems),
       })
+
       router.push(`/kasir/ringkasan?${params.toString()}`)
     } catch (err: any) {
-      setError(err.message || 'Gagal menyimpan pesanan.')
+      setError(err.message || 'Gagal membuka ringkasan pesanan.')
+      setSubmitting(false)
     }
-  }, [cartSummary, orderType, tableNumber, menus, quantities, router])
+  }, [
+    submitting,
+    cartSummary,
+    orderType,
+    tableNumber,
+    menus,
+    quantities,
+    router,
+  ])
 
   async function handleLogout() {
     setSigningOut(true)
-    await signOut()
-    router.replace('/auth/login')
+    try {
+      await signOut()
+      router.replace('/auth/login')
+    } finally {
+      setSigningOut(false)
+    }
   }
 
   const orderSubtitle =
     orderType === 'dine_in'
-      ? `Kasir· Dine In ·Meja ${tableNumber.trim() || '-'}`
-      : 'Kasir· Takeaway'
+      ? `Kasir · Dine In · Meja ${tableNumber.trim() || '-'}`
+      : 'Kasir · Takeaway'
 
   if (loading) {
     return (
@@ -313,12 +414,9 @@ export default function InputPesananView({
     )
   }
 
-  // Error ditampilkan di dalam form, bukan layar penuh
-
   return (
     <div className="min-h-screen bg-[#F9F7F6] flex justify-center">
       <div className="w-full max-w-[430px] min-h-screen bg-white shadow-sm flex flex-col relative pb-36">
-        {/* Top App Bar */}
         <header className="sticky top-0 z-20 bg-white px-4 h-14 flex items-center justify-between border-b border-zinc-100">
           <div className="flex items-center gap-3">
             <button
@@ -359,7 +457,7 @@ export default function InputPesananView({
                 fill="#1F2933"
               />
               <path
-                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 27"
+                d="M7 27C7 22.4 10.8 19.5 16 19.5C21.2 19.5 25 22.4 25 27"
                 fill="#1E293B"
               />
               <path d="M14.5 19.5L16 24L17.5 19.5H14.5Z" fill="#FFFFFF" />
@@ -368,11 +466,11 @@ export default function InputPesananView({
         </header>
 
         {error && (
-          <div className="p-4 mb-2 rounded-lg bg-red-50 border border-red-200">
+          <div className="mx-4 mt-3 p-4 rounded-lg bg-red-50 border border-red-200">
             <p className="text-sm font-semibold text-red-800">{error}</p>
           </div>
         )}
-        {/* Hero Merah Gradasi */}
+
         <section className="bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] px-5 pt-5 pb-7 rounded-b-[28px] text-white shadow-sm">
           <div className="flex items-start justify-between gap-2">
             <div>
@@ -396,7 +494,12 @@ export default function InputPesananView({
             <div className="mt-3 pt-3 border-t border-white/15 flex items-center gap-2 text-xs">
               <button
                 type="button"
-                onClick={() => setOrderType('dine_in')}
+                onClick={() => {
+                  setOrderType('dine_in')
+                  if (tableNumber.trim()) {
+                    setTableWarning(null)
+                  }
+                }}
                 className={`px-3 py-1.5 rounded-full font-semibold transition-colors ${
                   orderType === 'dine_in'
                     ? 'bg-white text-[#B71C1C]'
@@ -407,7 +510,11 @@ export default function InputPesananView({
               </button>
               <button
                 type="button"
-                onClick={() => setOrderType('takeaway')}
+                onClick={() => {
+                  setOrderType('takeaway')
+                  setTableNumber('')
+                  setTableWarning(null)
+                }}
                 className={`px-3 py-1.5 rounded-full font-semibold transition-colors ${
                   orderType === 'takeaway'
                     ? 'bg-white text-[#B71C1C]'
@@ -418,9 +525,15 @@ export default function InputPesananView({
               </button>
               {orderType === 'dine_in' && (
                 <input
+                  ref={tableInputRef}
                   type="text"
                   value={tableNumber}
-                  onChange={(e) => setTableNumber(e.target.value)}
+                  onChange={(e) => {
+                    setTableNumber(e.target.value)
+                    if (e.target.value.trim()) {
+                      setTableWarning(null)
+                    }
+                  }}
                   placeholder="No. Meja"
                   aria-label="Nomor Meja"
                   style={{ color: '#000000', WebkitTextFillColor: '#000000' }}
@@ -431,9 +544,26 @@ export default function InputPesananView({
           )}
         </section>
 
-        {/* Konten Utama Input Pesanan */}
         <main className="px-4 pt-4 space-y-3.5 flex-1">
-          {/* Pencarian Menu */}
+          {tableWarning && (
+            <div
+              role="alert"
+              className="rounded-2xl bg-[#FBE9E7] border border-[#F5C6C2] px-3.5 py-2.5 flex items-center justify-between gap-2"
+            >
+              <p className="text-xs font-bold text-[#B71C1C]">{tableWarning}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingOrderContext(true)
+                  setTimeout(() => tableInputRef.current?.focus(), 0)
+                }}
+                className="px-2.5 py-1 rounded-full bg-[#C62828] text-white text-[11px] font-bold shrink-0"
+              >
+                Isi Meja
+              </button>
+            </div>
+          )}
+
           <div>
             <input
               type="text"
@@ -445,7 +575,6 @@ export default function InputPesananView({
             />
           </div>
 
-          {/* Filter Pills */}
           <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
             {(['Semua', 'Mie', 'Minuman', 'Dine-in'] as const).map((chip) => {
               const isSelected = activeFilter === chip
@@ -453,7 +582,12 @@ export default function InputPesananView({
                 <button
                   key={chip}
                   type="button"
-                  onClick={() => setActiveFilter(chip)}
+                  onClick={() => {
+                    setActiveFilter(chip)
+                    if (chip === 'Dine-in') {
+                      setOrderType('dine_in')
+                    }
+                  }}
                   className={`px-4 py-1.5 rounded-full text-[12.5px] transition-colors shrink-0 ${
                     isSelected
                       ? 'bg-[#C62828] text-white font-bold shadow-xs'
@@ -466,7 +600,6 @@ export default function InputPesananView({
             })}
           </div>
 
-          {/* Grid Kartu Menu 2 Kolom */}
           {filteredMenus.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-[#EAD7D5] p-6 text-center text-xs text-zinc-500">
               Menu tidak ditemukan.
@@ -517,7 +650,6 @@ export default function InputPesananView({
                       </div>
                     </div>
 
-                    {/* Kontrol Jumlah / Tambah */}
                     <div className="mt-3 px-0.5">
                       {badge.isSoldOut ? (
                         <div className="h-8" aria-hidden="true" />
@@ -563,12 +695,11 @@ export default function InputPesananView({
           )}
         </main>
 
-        {/* Floating Keranjang Summary Bar */}
         <div className="fixed bottom-16 w-full max-w-[430px] px-3.5 pb-2 pt-1 z-20 pointer-events-none">
           <button
             type="button"
-            onClick={handleSimpanPesanan}
-            disabled={cartSummary.totalPortions <= 0}
+            onClick={handleLanjutRingkasan}
+            disabled={submitting || cartSummary.totalPortions <= 0}
             className="pointer-events-auto w-full rounded-2xl bg-gradient-to-r from-[#C92A2A] via-[#B2181B] to-[#8C1317] px-4 py-3 text-white shadow-lg flex items-center justify-between gap-3 disabled:opacity-60 hover:opacity-98 transition-opacity"
           >
             <div className="text-left">
@@ -581,13 +712,12 @@ export default function InputPesananView({
             </div>
 
             <span className="inline-flex items-center gap-1.5 text-[13.5px] font-bold text-white shrink-0">
-              <span>Lihat Pesanan</span>
+              <span>{submitting ? 'Memproses...' : 'Lihat Pesanan'}</span>
               <span aria-hidden="true">→</span>
             </span>
           </button>
         </div>
 
-        {/* Bottom Navigation Kasir (Pesanan & Daftar) */}
         <nav
           aria-label="Navigasi Kasir"
           className="fixed bottom-0 w-full max-w-[430px] bg-white border-t border-zinc-100 px-10 py-2 flex items-center justify-around z-20"

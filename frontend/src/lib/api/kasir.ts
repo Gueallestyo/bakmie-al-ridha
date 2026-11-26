@@ -43,7 +43,8 @@ export async function daftarPesanan() {
 }
 
 export async function validasiPembayaran(payload: {
-  id_pesanan: string
+  id_pesanan?: string
+  nomor_pesanan?: string
   metode_pembayaran: 'tunai' | 'qris'
   uang_diterima?: number | null
   jumlah_dibayar: number

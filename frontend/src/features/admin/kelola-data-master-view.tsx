@@ -36,6 +36,12 @@ export interface MasterDataRow {
   kategori?: string
 }
 
+function getJakartaToday(): string {
+  return new Date().toLocaleDateString('en-CA', {
+    timeZone: 'Asia/Jakarta',
+  })
+}
+
 function formatRupiah(nominal: number): string {
   return `Rp${nominal.toLocaleString('id-ID')}`
 }
@@ -101,7 +107,6 @@ const MASTER_TAB_META: Record<
   akun: { label: 'Akun', searchPlaceholder: 'Cari akun...', ctaText: '+  Tambah Akun' },
 }
 
-// Preset menu standar kedai Bakmie Al-Ridah
 const MENU_PRESETS: Array<{
   nama_menu: string
   kategori_nama: string
@@ -141,13 +146,14 @@ export default function KelolaDataMasterView() {
   const [rows, setRows] = useState<MasterDataRow[]>([])
   const [kategoriOptions, setKategoriOptions] = useState<{ id_kategori: string; nama_kategori: string }[]>([])
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
   const [editingRow, setEditingRow] = useState<MasterDataRow | null>(null)
 
-  // Form state - Create menu
+  // Form state - Create / Edit
   const [namaInput, setNamaInput] = useState('')
   const [kategoriInput, setKategoriInput] = useState('')
   const [hargaInput, setHargaInput] = useState('')
@@ -162,16 +168,16 @@ export default function KelolaDataMasterView() {
   // Form state - Edit menu (porsi adjustment)
   const [editTambahPorsi, setEditTambahPorsi] = useState('')
   const [editKurangiPorsi, setEditKurangiPorsi] = useState('')
-  const [editKuotaData, setEditKuotaData] = useState<{ sisa_porsi: number; kuota_awal: number; ambang_peringatan: number } | null>(null)
+  const [editKuotaData, setEditKuotaData] = useState<{
+    sisa_porsi: number
+    kuota_awal: number
+    ambang_peringatan: number
+  } | null>(null)
 
   const tabMeta = MASTER_TAB_META[activeTab]
   const isMenuTab = activeTab === 'menu'
 
-  useEffect(() => {
-    loadData()
-  }, [activeTab])
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -192,7 +198,12 @@ export default function KelolaDataMasterView() {
           daftarMenu(),
           daftarKategori(),
         ])
-        setKategoriOptions(kategoriData.map((k) => ({ id_kategori: k.id_kategori, nama_kategori: k.nama_kategori })))
+        setKategoriOptions(
+          kategoriData.map((k) => ({
+            id_kategori: k.id_kategori,
+            nama_kategori: k.nama_kategori,
+          }))
+        )
         setRows(
           menuData.map((m) => ({
             id: m.id_menu,
@@ -221,12 +232,16 @@ export default function KelolaDataMasterView() {
       } else {
         setRows([])
       }
-    } catch (err: any) {
-      setError(err.message || 'Gagal memuat data.')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Gagal memuat data.')
     } finally {
       setLoading(false)
     }
-  }
+  }, [activeTab])
+
+  useEffect(() => {
+    void loadData()
+  }, [loadData])
 
   const visibleRows = useMemo(() => {
     const query = searchText.trim().toLowerCase()
@@ -237,75 +252,73 @@ export default function KelolaDataMasterView() {
     })
   }, [rows, activeTab, searchText])
 
+  async function ensureKategoriIdByName(kategoriNama: string): Promise<string> {
+    const existing = kategoriOptions.find(
+      (k) => k.nama_kategori.toLowerCase().trim() === kategoriNama.toLowerCase().trim()
+    )
+    if (existing) return existing.id_kategori
+
+    await buatKategori({ nama_kategori: kategoriNama, status_aktif: true })
+    const freshKategori = await daftarKategori()
+    setKategoriOptions(
+      freshKategori.map((k) => ({
+        id_kategori: k.id_kategori,
+        nama_kategori: k.nama_kategori,
+      }))
+    )
+    const created = freshKategori.find(
+      (k) => k.nama_kategori.toLowerCase().trim() === kategoriNama.toLowerCase().trim()
+    )
+    return created?.id_kategori || (freshKategori[0]?.id_kategori ?? '')
+  }
+
   async function handleSubmitForm(e: React.FormEvent) {
     e.preventDefault()
+    if (saving) return
+    setError(null)
 
     if (activeTab === 'menu' && !editingRow) {
-      // CREATE MENU - preset or custom
-      let namaMenu = namaInput.trim()
+      let namaMenu = customNamaMenu.trim() || namaInput.trim()
       let kategoriId = kategoriInput
-      let nominal = Number(hargaInput) || 0
-      let kuotaDefault = Number(tambahPorsiInput) || 0
-      let ambangDefault = Math.ceil(kuotaDefault / 2)
+      const nominal = Number(hargaInput) || 0
+      const kuotaDefault = Number(tambahPorsiInput) || 0
+      const preset = selectedPreset
+        ? MENU_PRESETS.find((p) => p.nama_menu === selectedPreset)
+        : undefined
+      const ambangDefault = preset
+        ? Math.min(preset.ambang_default, kuotaDefault)
+        : Math.ceil(kuotaDefault / 2)
 
-      // If preset selected, use preset data
-      if (selectedPreset) {
-        const preset = MENU_PRESETS.find((p) => p.nama_menu === selectedPreset)
+      setSaving(true)
+      try {
         if (preset) {
-          namaMenu = preset.nama_menu
-          nominal = preset.harga
-          kuotaDefault = preset.kuota_default
-          ambangDefault = preset.ambang_default
-          // Map kategori preset name to UUID (case-insensitive, flexible)
-          const kategoriMatch = kategoriOptions.find(
-            (k) => k.nama_kategori.toLowerCase().trim() === preset.kategori_nama.toLowerCase().trim()
-          )
-          if (kategoriMatch) {
-            kategoriId = kategoriMatch.id_kategori
-          } else {
-            // If kategori not found in options, create it automatically
-            try {
-              await buatKategori({ nama_kategori: preset.kategori_nama, status_aktif: true })
-              await loadData()
-              const freshKategori = await daftarKategori()
-              const newMatch = freshKategori.find(
-                (k) => k.nama_kategori.toLowerCase().trim() === preset.kategori_nama.toLowerCase().trim()
-              )
-              kategoriId = newMatch?.id_kategori || ''
-            } catch {
-              // If buatKategori fails, fallback to first available kategori
-              kategoriId = kategoriOptions.length > 0 ? kategoriOptions[0].id_kategori : ''
-            }
+          namaMenu = customNamaMenu.trim() || preset.nama_menu
+          if (!kategoriId) {
+            kategoriId = await ensureKategoriIdByName(preset.kategori_nama)
           }
-        }
-      } else {
-        // Custom menu - require manual nama
-        if (!namaMenu) {
+        } else if (!namaMenu) {
           setError('Nama menu wajib diisi.')
           return
         }
-      }
 
-      if (!kategoriId) {
-        setError('Kategori wajib dipilih.')
-        return
-      }
-      if (nominal <= 0) {
-        setError('Harga wajib diisi dan harus lebih dari 0.')
-        return
-      }
-      if (kuotaDefault < 0) {
-        setError('Jumlah porsi tidak boleh negatif.')
-        return
-      }
-      if (ambangDefault > kuotaDefault) {
-        setError('Ambang peringatan tidak boleh melebihi kuota default.')
-        return
-      }
+        if (!kategoriId) {
+          setError('Kategori wajib dipilih.')
+          return
+        }
+        if (nominal <= 0) {
+          setError('Harga wajib diisi dan harus lebih dari 0.')
+          return
+        }
+        if (kuotaDefault < 0) {
+          setError('Jumlah porsi tidak boleh negatif.')
+          return
+        }
+        if (ambangDefault > kuotaDefault) {
+          setError('Ambang peringatan tidak boleh melebihi kuota default.')
+          return
+        }
 
-      try {
-        // Create menu
-        const result = await buatMenu({
+        await buatMenu({
           id_kategori: kategoriId,
           nama_menu: namaMenu,
           harga: nominal,
@@ -313,14 +326,6 @@ export default function KelolaDataMasterView() {
           ambang_default: ambangDefault,
           status_aktif: aktifInput,
         })
-
-        // Create kuota_harian for today if kuotaDefault > 0
-        if (kuotaDefault > 0 && result.menu?.id_menu) {
-          await tambahPorsiMenu({
-            id_menu: result.menu.id_menu,
-            jumlahPorsi: kuotaDefault,
-          })
-        }
 
         setFormOpen(false)
         setEditingRow(null)
@@ -333,26 +338,30 @@ export default function KelolaDataMasterView() {
         setCustomNamaMenu('')
         setTambahPorsiInput('')
         await loadData()
-      } catch (err: any) {
-        setError(err.message || 'Gagal menyimpan menu.')
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Gagal menyimpan menu.')
+      } finally {
+        setSaving(false)
       }
       return
     }
 
-    // Non-menu tabs or edit menu
     if (editingRow && activeTab === 'menu') {
-      // EDIT MENU - only status_aktif + tambah/kurangi porsi
-      let tambahPorsi = Number(editTambahPorsi) || 0
-      let kurangiPorsi = Number(editKurangiPorsi) || 0
+      const tambahPorsi = Number(editTambahPorsi) || 0
+      const kurangiPorsi = Number(editKurangiPorsi) || 0
 
+      if (editKuotaData && kurangiPorsi > editKuotaData.sisa_porsi) {
+        setError(`Pengurangan porsi tidak boleh melebihi sisa porsi (${editKuotaData.sisa_porsi}).`)
+        return
+      }
+
+      setSaving(true)
       try {
-        // Update status_aktif
         await ubahMenu({
           id_menu: editingRow.id,
           status_aktif: aktifInput,
         })
 
-        // Handle tambah porsi
         if (tambahPorsi > 0) {
           await tambahPorsiMenu({
             id_menu: editingRow.id,
@@ -360,7 +369,6 @@ export default function KelolaDataMasterView() {
           })
         }
 
-        // Handle kurangi porsi
         if (kurangiPorsi > 0) {
           await kurangiPorsiMenu({
             id_menu: editingRow.id,
@@ -375,49 +383,62 @@ export default function KelolaDataMasterView() {
         setEditKurangiPorsi('')
         setEditKuotaData(null)
         await loadData()
-      } catch (err: any) {
-        setError(err.message || 'Gagal memperbarui menu.')
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Gagal memperbarui menu.')
+      } finally {
+        setSaving(false)
       }
       return
     }
 
-    // Non-menu categories (kategori, topping, akun)
     if (!namaInput.trim()) {
       setError('Nama wajib diisi.')
       return
     }
 
     const nominal = Number(hargaInput) || 0
-    let subjudul = catatanInput.trim()
-    let iconKind: MasterDataRow['iconKind'] = 'category'
 
+    setSaving(true)
     try {
       if (activeTab === 'kategori') {
         if (editingRow) {
-          await ubahKategori({ id_kategori: editingRow.id, nama_kategori: namaInput.trim(), status_aktif: aktifInput })
+          await ubahKategori({
+            id_kategori: editingRow.id,
+            nama_kategori: namaInput.trim(),
+            status_aktif: aktifInput,
+          })
         } else {
           await buatKategori({ nama_kategori: namaInput.trim(), status_aktif: aktifInput })
         }
       } else if (activeTab === 'topping') {
-        subjudul = `Topping - ${formatRupiah(nominal)}`
-        iconKind = 'topping'
         if (editingRow) {
-          await ubahTopping({ id_topping: editingRow.id, nama_topping: namaInput.trim(), harga_topping: nominal, status_aktif: aktifInput })
+          await ubahTopping({
+            id_topping: editingRow.id,
+            nama_topping: namaInput.trim(),
+            harga_topping: nominal,
+            status_aktif: aktifInput,
+          })
         } else {
-          await buatTopping({ nama_topping: namaInput.trim(), harga_topping: nominal, status_aktif: aktifInput })
+          await buatTopping({
+            nama_topping: namaInput.trim(),
+            harga_topping: nominal,
+            status_aktif: aktifInput,
+          })
         }
       }
 
       setFormOpen(false)
       setEditingRow(null)
       setNamaInput('')
-      setKategoriInput('Mie')
+      setKategoriInput('')
       setHargaInput('15000')
       setCatatanInput('')
       setAktifInput(true)
       await loadData()
-    } catch (err: any) {
-      setError(err.message || 'Gagal menyimpan data.')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Gagal menyimpan data.')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -433,8 +454,8 @@ export default function KelolaDataMasterView() {
         await hapusTopping(row.id)
       }
       await loadData()
-    } catch (err: any) {
-      setError(err.message || 'Gagal menghapus data.')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Gagal menghapus data.')
     }
   }
 
@@ -445,6 +466,7 @@ export default function KelolaDataMasterView() {
   }
 
   function handleOpenCreate() {
+    setError(null)
     setEditingRow(null)
     setNamaInput('')
     setKategoriInput(kategoriOptions.length > 0 ? kategoriOptions[0].id_kategori : '')
@@ -461,16 +483,15 @@ export default function KelolaDataMasterView() {
   }
 
   async function handleOpenEdit(row: MasterDataRow) {
+    setError(null)
     if (activeTab === 'menu') {
-      // Edit menu - only status + porsi adjustment
       setEditingRow(row)
       setAktifInput(row.aktif)
       setEditTambahPorsi('')
       setEditKurangiPorsi('')
       setEditKuotaData(null)
-      // Load kuota_harian data for this menu today
       try {
-        const today = new Date().toISOString().split('T')[0]
+        const today = getJakartaToday()
         const kuotaData = await daftarKuotaHarian()
         const found = kuotaData.find((k) => k.id_menu === row.id && k.tanggal === today)
         if (found) {
@@ -481,7 +502,6 @@ export default function KelolaDataMasterView() {
           })
         }
       } catch {
-        // If kuota data not available, proceed with empty
         setEditKuotaData(null)
       }
     } else {
@@ -503,17 +523,51 @@ export default function KelolaDataMasterView() {
     )
   }
 
+  const sisaPorsi = editKuotaData?.sisa_porsi
+  const kuotaAwal = editKuotaData?.kuota_awal
+  const ambangPeringatan = editKuotaData?.ambang_peringatan ?? 0
+  const statusKuotaText =
+    sisaPorsi === undefined
+      ? ''
+      : sisaPorsi === 0
+        ? 'Sold Out'
+        : sisaPorsi <= ambangPeringatan
+          ? 'Hampir habis'
+          : 'Aman'
+
   return (
     <div className="min-h-screen bg-[#F9F7F6] flex justify-center">
       <div className="w-full max-w-[430px] min-h-screen bg-white shadow-sm flex flex-col relative pb-36">
+        <MobileAdminDrawer
+          open={drawerOpen}
+          activeKey="kelola-data"
+          onClose={() => setDrawerOpen(false)}
+          onLogout={handleLogout}
+          signingOut={signingOut}
+        />
+
         <header className="sticky top-0 z-20 bg-white px-4 h-14 flex items-center justify-between border-b border-zinc-100">
           <div className="flex items-center gap-3">
-            <button type="button" onClick={() => setDrawerOpen(true)} aria-label="Buka menu navigasi" className="p-1.5 -ml-1.5 rounded-lg text-[#B82025] hover:bg-red-50 transition-colors">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Buka menu navigasi"
+              className="p-1.5 -ml-1.5 rounded-lg text-[#B82025] hover:bg-red-50 transition-colors"
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <line x1="3" y1="6" x2="21" y2="6" />
+                <line x1="3" y1="12" x2="21" y2="12" />
+                <line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
             </button>
             <span className="font-bold text-[17px] tracking-tight text-[#B82025]">Bakmie Al Ridha</span>
           </div>
-          <button type="button" onClick={() => setDrawerOpen(true)} aria-label="Profil Admin" className="w-9 h-9 rounded-full bg-[#2C3E4C] flex items-center justify-center overflow-hidden ring-2 ring-red-100">
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            aria-label="Profil Admin"
+            className="w-9 h-9 rounded-full bg-[#2C3E4C] flex items-center justify-center overflow-hidden ring-2 ring-red-100"
+          >
             <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
               <circle cx="16" cy="11" r="5" fill="#F3C6A5" />
               <path d="M11 10.5C11 7.8 13.2 6 16 6C18.8 6 21 10.5C20.2 9.2 18.5 8.6 16 8.6C13.5 8.6 11.8 9.2 11 10.5Z" fill="#1F2933" />
@@ -533,7 +587,19 @@ export default function KelolaDataMasterView() {
             {(Object.keys(MASTER_TAB_META) as MasterCategoryTab[]).map((tabKey) => {
               const isSelected = activeTab === tabKey
               return (
-                <button key={tabKey} type="button" onClick={() => { setActiveTab(tabKey); setSearchText('') }} className={`px-4 py-2 rounded-full text-[13px] transition-colors shrink-0 ${isSelected ? 'bg-[#C62828] text-white font-bold shadow-xs' : 'bg-white text-[#7A6A68] font-medium border border-[#EAD7D5] hover:border-red-300'}`}>
+                <button
+                  key={tabKey}
+                  type="button"
+                  onClick={() => {
+                    setActiveTab(tabKey)
+                    setSearchText('')
+                  }}
+                  className={`px-4 py-2 rounded-full text-[13px] transition-colors shrink-0 ${
+                    isSelected
+                      ? 'bg-[#C62828] text-white font-bold shadow-xs'
+                      : 'bg-white text-[#7A6A68] font-medium border border-[#EAD7D5] hover:border-red-300'
+                  }`}
+                >
                   {MASTER_TAB_META[tabKey].label}
                 </button>
               )
@@ -541,17 +607,26 @@ export default function KelolaDataMasterView() {
           </div>
 
           <div>
-            <input type="text" value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder={tabMeta.searchPlaceholder} className="w-full h-11 px-4 rounded-2xl border border-[#EAD7D5] bg-white text-[13.5px] text-zinc-900 placeholder:text-[#A39290] focus:outline-none focus:border-[#C62828] focus:ring-2 focus:ring-red-100 transition-all" />
+            <input
+              type="text"
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              placeholder={tabMeta.searchPlaceholder}
+              className="w-full h-11 px-4 rounded-2xl border border-[#EAD7D5] bg-white text-[13.5px] text-zinc-900 placeholder:text-[#A39290] focus:outline-none focus:border-[#C62828] focus:ring-2 focus:ring-red-100 transition-all"
+            />
           </div>
 
           <div className="space-y-3 pt-0.5">
             {visibleRows.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-[#EAD7D5] p-6 text-center text-xs text-zinc-500">
-                Tidak ada data yang cocok dengan "{searchText}".
+                Tidak ada data yang cocok dengan &quot;{searchText}&quot;.
               </div>
             ) : (
               visibleRows.map((row) => (
-                <div key={row.id} className="rounded-2xl border border-[#F3E2DF] bg-white px-3.5 py-3 flex items-center justify-between gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                <div
+                  key={row.id}
+                  className="rounded-2xl border border-[#F3E2DF] bg-white px-3.5 py-3 flex items-center justify-between gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
+                >
                   <div className="flex items-center gap-3 min-w-0">
                     <MasterRowIcon kind={row.iconKind} />
                     <div className="min-w-0">
@@ -560,169 +635,286 @@ export default function KelolaDataMasterView() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2.5 shrink-0">
-                    <span className={`px-3 py-1 rounded-full text-[11px] font-bold ${row.aktif ? 'bg-[#E6F4EA] text-[#1E7E34]' : 'bg-[#EFECEB] text-[#6E6564]'}`}>{row.aktif ? 'Aktif' : 'Nonaktif'}</span>
-                    <button type="button" onClick={() => handleOpenEdit(row)} aria-label={`Edit ${row.nama}`} className="w-8 h-8 rounded-full bg-[#FBE9E7] text-[#C62828] flex items-center justify-center hover:bg-red-100 transition-colors">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg>
+                    <span
+                      className={`px-3 py-1 rounded-full text-[11px] font-bold ${
+                        row.aktif ? 'bg-[#E6F4EA] text-[#1E7E34]' : 'bg-[#EFECEB] text-[#6E6564]'
+                      }`}
+                    >
+                      {row.aktif ? 'Aktif' : 'Nonaktif'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenEdit(row)}
+                      aria-label={`Edit ${row.nama}`}
+                      className="w-8 h-8 rounded-full bg-[#FBE9E7] text-[#C62828] flex items-center justify-center hover:bg-red-100 transition-colors"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      </svg>
                     </button>
                     {activeTab !== 'akun' && (
-                      <button type="button" onClick={() => handleDelete(row)} aria-label={`Hapus ${row.nama}`} className="w-8 h-8 rounded-full bg-[#FBE9E7] text-[#C62828] flex items-center justify-center hover:bg-red-100 transition-colors">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                      <button
+                        type="button"
+                        onClick={() => void handleDelete(row)}
+                        aria-label={`Hapus ${row.nama}`}
+                        className="w-8 h-8 rounded-full bg-[#FBE9E7] text-[#C62828] flex items-center justify-center hover:bg-red-100 transition-colors"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
                       </button>
                     )}
                   </div>
                 </div>
-              ))}
+              ))
             )}
           </div>
         </main>
 
         <div className="fixed bottom-16 w-full max-w-[430px] px-4 pb-3 pt-2 bg-gradient-to-t from-white via-white to-white/80 z-20">
-          <button type="button" onClick={handleOpenCreate} className="w-full h-12 rounded-full bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] text-white text-[14.5px] font-bold shadow-md hover:opacity-95 transition-opacity flex items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={handleOpenCreate}
+            className="w-full h-12 rounded-full bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] text-white text-[14.5px] font-bold shadow-md hover:opacity-95 transition-opacity flex items-center justify-center gap-2"
+          >
             {tabMeta.ctaText}
           </button>
         </div>
 
-        <nav aria-label="Navigasi Utama Admin" className="fixed bottom-0 w-full max-w-[430px] bg-white border-t border-zinc-100 px-6 py-2 flex items-center justify-between z-20">
+        <nav
+          aria-label="Navigasi Utama Admin"
+          className="fixed bottom-0 w-full max-w-[430px] bg-white border-t border-zinc-100 px-6 py-2 flex items-center justify-between z-20"
+        >
           <Link href="/admin" className="flex flex-col items-center gap-1 text-zinc-600 hover:text-[#C62828] transition-colors">
-            <span className="px-4 py-1 rounded-full flex items-center justify-center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="8" height="8" rx="1.5" /><rect x="13" y="3" width="8" height="5" rx="1.5" /><rect x="13" y="10" width="8" height="11" rx="1.5" /><rect x="3" y="13" width="8" height="8" rx="1.5" /></svg></span>
+            <span className="px-4 py-1 rounded-full flex items-center justify-center">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="3" width="8" height="8" rx="1.5" />
+                <rect x="13" y="3" width="8" height="5" rx="1.5" />
+                <rect x="13" y="10" width="8" height="11" rx="1.5" />
+                <rect x="3" y="13" width="8" height="8" rx="1.5" />
+              </svg>
+            </span>
             <span className="text-[11px] font-medium">Dashboard</span>
           </Link>
           <Link href="/admin/kelola-data" className="flex flex-col items-center gap-1 text-[#C62828]">
-            <span className="px-4 py-1 rounded-full bg-[#FBE9E7] flex items-center justify-center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg></span>
+            <span className="px-4 py-1 rounded-full bg-[#FBE9E7] flex items-center justify-center">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+              </svg>
+            </span>
             <span className="text-[11px] font-bold">Kelola Data</span>
           </Link>
           <Link href="/admin/menu" className="flex flex-col items-center gap-1 text-zinc-600 hover:text-[#C62828] transition-colors">
-            <span className="px-4 py-1 rounded-full flex items-center justify-center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><circle cx="4" cy="6" r="1" fill="currentColor" /><circle cx="4" cy="12" r="1" fill="currentColor" /><circle cx="4" cy="18" r="1" fill="currentColor" /></svg></span>
+            <span className="px-4 py-1 rounded-full flex items-center justify-center">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="8" y1="6" x2="21" y2="6" />
+                <line x1="8" y1="12" x2="21" y2="12" />
+                <line x1="8" y1="18" x2="21" y2="18" />
+                <circle cx="4" cy="6" r="1" fill="currentColor" />
+                <circle cx="4" cy="12" r="1" fill="currentColor" />
+                <circle cx="4" cy="18" r="1" fill="currentColor" />
+              </svg>
+            </span>
             <span className="text-[11px] font-medium">Kuota</span>
           </Link>
         </nav>
 
         {formOpen && (
           <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40">
-            <div className="w-full max-w-[430px] bg-white rounded-t-3xl sm:rounded-3xl shadow-xl flex flex-col max-h-[85vh]">
-              <div className="flex items-center justify-between px-4 py-3 bg-white rounded-t-3xl sm:rounded-3xl z-10">
+            <form
+              onSubmit={(e) => void handleSubmitForm(e)}
+              className="w-full max-w-[430px] bg-white rounded-t-3xl sm:rounded-3xl shadow-xl flex flex-col max-h-[85vh]"
+            >
+              <div className="flex items-center justify-between px-4 py-3 bg-white rounded-t-3xl sm:rounded-3xl z-10 border-b border-zinc-100">
                 <h2 className="text-base font-bold text-zinc-900">
-                  {editingRow && isMenuTab ? `Edit ${editingRow.nama}` : editingRow ? `Edit ${tabMeta.label}` : `Tambah ${tabMeta.label}`}
+                  {editingRow && isMenuTab
+                    ? `Edit ${editingRow.nama}`
+                    : editingRow
+                      ? `Edit ${tabMeta.label}`
+                      : `Tambah ${tabMeta.label}`}
                 </h2>
-                <button type="button" onClick={() => setFormOpen(false)} className="text-xs font-semibold text-zinc-500 hover:text-zinc-900 px-2.5 py-1 rounded-lg bg-zinc-100">Batal</button>
+                <button
+                  type="button"
+                  onClick={() => setFormOpen(false)}
+                  className="text-xs font-semibold text-zinc-500 hover:text-zinc-900 px-2.5 py-1 rounded-lg bg-zinc-100"
+                >
+                  Batal
+                </button>
               </div>
-              {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm z-10">{error}</div>}
+
+              {error && (
+                <div className="mx-4 mt-3 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm z-10">
+                  {error}
+                </div>
+              )}
+
               <div className="p-4 space-y-4 flex-1 overflow-y-auto bg-white">
                 {activeTab === 'menu' && editingRow ? (
-                  // EDIT MENU FORM - only status + porsi adjustment
                   <div className="space-y-3">
-                    <div className="border border-zinc-200 rounded-lg p-3 bg-zinc-50">
-                      <div className="flex items-center justify-between mb-2">
+                    <div className="border border-zinc-200 rounded-lg p-3 bg-zinc-50 space-y-2.5">
+                      <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-zinc-700">Nama Menu</span>
                         <span className="text-xs text-zinc-500">{editingRow.nama}</span>
                       </div>
-                      <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-zinc-700">Kategori</span>
                         <span className="text-xs text-zinc-500">{editingRow.kategori ?? '-'}</span>
                       </div>
-                      <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-zinc-700">Harga</span>
-                        <span className="text-xs text-zinc-500">{editingRow.harga ? formatRupiah(editingRow.harga) : '-'}</span>
+                        <span className="text-xs text-zinc-500">
+                          {editingRow.harga ? formatRupiah(editingRow.harga) : '-'}
+                        </span>
                       </div>
-                      {/* Sisa porsi info */}
-                      <div className="space-y-1 pt-2 border-t border-zinc-100">
-                        <label className="block text-xs font-semibold text-zinc-700 mb-1">Sisa Porsi Hari Ini</label>
+                      <div className="space-y-1 pt-2 border-t border-zinc-200">
+                        <label className="block text-xs font-semibold text-zinc-700">Sisa Porsi Hari Ini</label>
                         <div className="flex items-center gap-2">
-                          <span className={`text-[14px] font-bold ${editKuotaData?.sisa_porsi === 0 ? 'text-red-600' : 'text-zinc-900'}`}>
-                            {editKuotaData?.sisa_porsi ?? '-'} / {editKuotaData?.kuota_awal ?? '-'}
+                          <span className={`text-[14px] font-bold ${sisaPorsi === 0 ? 'text-red-600' : 'text-zinc-900'}`}>
+                            {sisaPorsi ?? '-'} / {kuotaAwal ?? '-'}
                           </span>
-                          <span className={`text-[10px] ${editKuotaData?.sisa_porsi === 0 ? 'text-red-500' : editKuotaData?.sisa_porsi! <= editKuotaData?.ambang_peringatan! ? 'text-orange-500' : 'text-green-500'}`}>
-                            {editKuotaData?.sisa_porsi === 0 ? 'Sold Out' : editKuotaData?.sisa_porsi! <= editKuotaData?.ambang_peringatan! ? 'Hampir habis' : 'Aman'}
-                          </span>
+                          {statusKuotaText && (
+                            <span
+                              className={`text-[10px] font-semibold ${
+                                sisaPorsi === 0
+                                  ? 'text-red-500'
+                                  : (sisaPorsi ?? 0) <= ambangPeringatan
+                                    ? 'text-orange-500'
+                                    : 'text-green-600'
+                              }`}
+                            >
+                              {statusKuotaText}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <label className="flex items-center justify-between pt-1 cursor-pointer">
                         <span className="text-xs font-semibold text-zinc-700">Status Aktif</span>
-                        <input type="checkbox" checked={aktifInput} onChange={(e) => setAktifInput(e.target.checked)} className="w-4 h-4 accent-[#C62828]" />
+                        <input
+                          type="checkbox"
+                          checked={aktifInput}
+                          onChange={(e) => setAktifInput(e.target.checked)}
+                          className="w-4 h-4 accent-[#C62828]"
+                        />
                       </label>
-                      <div className="space-y-2">
-                        <label className="block text-xs font-semibold text-zinc-700 mb-1">Tambah Porsi</label>
-                        <input type="number" min={0} step={1} value={editTambahPorsi} onChange={(e) => setEditTambahPorsi(e.target.value)} placeholder="0" className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
+                      <div className="space-y-1">
+                        <label className="block text-xs font-semibold text-zinc-700">Tambah Porsi</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={editTambahPorsi}
+                          onChange={(e) => setEditTambahPorsi(e.target.value)}
+                          placeholder="0"
+                          className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 bg-white text-sm focus:outline-none focus:border-[#C62828]"
+                        />
                       </div>
-                      <div className="space-y-2">
-                        <label className="block text-xs font-semibold text-zinc-700 mb-1">Kurangi Porsi</label>
-                        <input type="number" min={0} step={1} value={editKurangiPorsi} onChange={(e) => setEditKurangiPorsi(e.target.value)} placeholder="0" className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
-                        <p className="text-[10px] text-zinc-500 mt-1">Maksimal {editKuotaData?.sisa_porsi ?? 0} porsi</p>
+                      <div className="space-y-1">
+                        <label className="block text-xs font-semibold text-zinc-700">Kurangi Porsi</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={editKurangiPorsi}
+                          onChange={(e) => setEditKurangiPorsi(e.target.value)}
+                          placeholder="0"
+                          className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 bg-white text-sm focus:outline-none focus:border-[#C62828]"
+                        />
+                        <p className="text-[10px] text-zinc-500">Maksimal {sisaPorsi ?? 0} porsi</p>
                       </div>
                     </div>
                   </div>
                 ) : (
-                  // CREATE MENU FORM or EDIT non-menu
                   <div className="space-y-3">
                     {activeTab === 'menu' ? (
                       <>
                         <div>
                           <label className="block text-xs font-semibold text-zinc-700 mb-1">Pilih Menu Preset</label>
-                          <select value={selectedPreset ?? ''} onChange={(e) => {
-                            setSelectedPreset(e.target.value || null)
-                            const preset = MENU_PRESETS.find((p) => p.nama_menu === e.target.value)
-                            if (preset) {
-                              setCustomNamaMenu(preset.nama_menu)
-                              setHargaInput(String(preset.harga))
-                              setTambahPorsiInput(String(preset.kuota_default))
-                              const kategoriMatch = kategoriOptions.find(
-                                (k) => k.nama_kategori.toLowerCase().trim() === preset.kategori_nama.toLowerCase().trim()
-                              )
-                              if (kategoriMatch) {
-                                setKategoriInput(kategoriMatch.id_kategori)
+                          <select
+                            value={selectedPreset ?? ''}
+                            onChange={(e) => {
+                              const nextPreset = e.target.value || null
+                              setSelectedPreset(nextPreset)
+                              const preset = MENU_PRESETS.find((p) => p.nama_menu === nextPreset)
+                              if (preset) {
+                                setCustomNamaMenu(preset.nama_menu)
+                                setNamaInput(preset.nama_menu)
+                                setHargaInput(String(preset.harga))
+                                setTambahPorsiInput(String(preset.kuota_default))
+                                void ensureKategoriIdByName(preset.kategori_nama).then((resolvedId) => {
+                                  setKategoriInput(resolvedId)
+                                })
                               } else {
-                                // Try to create the kategori automatically
-                                setKategoriInput('')
-                                // Trigger async kategori creation
-                                buatKategori({ nama_kategori: preset.kategori_nama, status_aktif: true })
-                                  .then(async () => {
-                                    await loadData()
-                                    const freshKategori = await daftarKategori()
-                                    const newMatch = freshKategori.find(
-                                      (k) => k.nama_kategori.toLowerCase().trim() === preset.kategori_nama.toLowerCase().trim()
-                                    )
-                                    setKategoriInput(newMatch?.id_kategori || '')
-                                  })
-                                  .catch(() => {
-                                    setKategoriInput(kategoriOptions.length > 0 ? kategoriOptions[0].id_kategori : '')
-                                  })
+                                setCustomNamaMenu('')
+                                setNamaInput('')
+                                setHargaInput('')
+                                setTambahPorsiInput('')
+                                setKategoriInput(kategoriOptions.length > 0 ? kategoriOptions[0].id_kategori : '')
                               }
-                            } else {
-                              setCustomNamaMenu('')
-                              setHargaInput('')
-                              setTambahPorsiInput('')
-                              setKategoriInput(kategoriOptions.length > 0 ? kategoriOptions[0].id_kategori : '')
-                            }
-                          }} className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm bg-white focus:outline-none focus:border-[#C62828]">
+                            }}
+                            className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm bg-white focus:outline-none focus:border-[#C62828]"
+                          >
                             <option value="">-- Pilih preset menu --</option>
                             {MENU_PRESETS.map((p) => (
-                              <option key={p.nama_menu} value={p.nama_menu}>{p.nama_menu}</option>
+                              <option key={p.nama_menu} value={p.nama_menu}>
+                                {p.nama_menu}
+                              </option>
                             ))}
                           </select>
                         </div>
                         <div>
                           <label className="block text-xs font-semibold text-zinc-700 mb-1">Nama Menu (custom)</label>
-                          <input type="text" value={customNamaMenu} onChange={(e) => {
-                            setCustomNamaMenu(e.target.value)
-                            setSelectedPreset(null)
-                          }} placeholder="Ketik menu sendiri..." className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
+                          <input
+                            type="text"
+                            value={customNamaMenu}
+                            onChange={(e) => {
+                              setCustomNamaMenu(e.target.value)
+                              setNamaInput(e.target.value)
+                              setSelectedPreset(null)
+                            }}
+                            placeholder="Ketik menu sendiri..."
+                            className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]"
+                          />
                           <p className="text-[10px] text-zinc-500 mt-1">Kosongkan jika menggunakan preset di atas.</p>
                         </div>
                         <div>
                           <label className="block text-xs font-semibold text-zinc-700 mb-1">Kategori</label>
-                          <select value={kategoriInput} onChange={(e) => setKategoriInput(e.target.value)} className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm bg-white focus:outline-none focus:border-[#C62828]">
+                          <select
+                            value={kategoriInput}
+                            onChange={(e) => setKategoriInput(e.target.value)}
+                            className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm bg-white focus:outline-none focus:border-[#C62828]"
+                          >
+                            <option value="">-- Pilih kategori --</option>
                             {kategoriOptions.map((k) => (
-                              <option key={k.id_kategori} value={k.id_kategori}>{k.nama_kategori}</option>
+                              <option key={k.id_kategori} value={k.id_kategori}>
+                                {k.nama_kategori}
+                              </option>
                             ))}
                           </select>
                         </div>
                         <div>
                           <label className="block text-xs font-semibold text-zinc-700 mb-1">Harga (Rp)</label>
-                          <input type="number" min={0} step={500} value={hargaInput} onChange={(e) => setHargaInput(e.target.value)} placeholder="0" className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
+                          <input
+                            type="number"
+                            min={0}
+                            step={500}
+                            value={hargaInput}
+                            onChange={(e) => setHargaInput(e.target.value)}
+                            placeholder="0"
+                            className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]"
+                          />
                         </div>
                         <div>
                           <label className="block text-xs font-semibold text-zinc-700 mb-1">Jumlah Porsi Awal</label>
-                          <input type="number" min={0} step={1} value={tambahPorsiInput} onChange={(e) => setTambahPorsiInput(e.target.value)} placeholder="0" className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
+                          <input
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={tambahPorsiInput}
+                            onChange={(e) => setTambahPorsiInput(e.target.value)}
+                            placeholder="0"
+                            className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]"
+                          />
                           <p className="text-[10px] text-zinc-500 mt-1">Disimpan ke kuota_default dan kuota harian hari ini.</p>
                         </div>
                       </>
@@ -730,41 +922,67 @@ export default function KelolaDataMasterView() {
                       <>
                         <div>
                           <label className="block text-xs font-semibold text-zinc-700 mb-1">Nama {tabMeta.label}</label>
-                          <input type="text" required value={namaInput} onChange={(e) => setNamaInput(e.target.value)} placeholder={`Masukkan nama ${tabMeta.label.toLowerCase()}`} className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
+                          <input
+                            type="text"
+                            required
+                            value={namaInput}
+                            onChange={(e) => setNamaInput(e.target.value)}
+                            placeholder={`Masukkan nama ${tabMeta.label.toLowerCase()}`}
+                            className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]"
+                          />
                         </div>
-                        {isMenuTab && (
-                          <div>
-                            <label className="block text-xs font-semibold text-zinc-700 mb-1">Kategori</label>
-                            <select value={kategoriInput} onChange={(e) => setKategoriInput(e.target.value)} className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm bg-white focus:outline-none focus:border-[#C62828]">
-                              {kategoriOptions.map((k) => (
-                                <option key={k.id_kategori} value={k.id_kategori}>{k.nama_kategori}</option>
-                              ))}
-                            </select>
-                          </div>
-                        )}
-                        {(isMenuTab || activeTab === 'topping') && (
+                        {activeTab === 'topping' && (
                           <div>
                             <label className="block text-xs font-semibold text-zinc-700 mb-1">Harga (Rp)</label>
-                            <input type="number" min={0} step={500} required value={hargaInput} onChange={(e) => setHargaInput(e.target.value)} className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
+                            <input
+                              type="number"
+                              min={0}
+                              step={500}
+                              required
+                              value={hargaInput}
+                              onChange={(e) => setHargaInput(e.target.value)}
+                              className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]"
+                            />
                           </div>
                         )}
                         {(activeTab === 'kategori' || activeTab === 'akun') && (
                           <div>
-                            <label className="block text-xs font-semibold text-zinc-700 mb-1">{activeTab === 'akun' ? 'Role & Username' : 'Keterangan'}</label>
-                            <input type="text" value={catatanInput} onChange={(e) => setCatatanInput(e.target.value)} placeholder={activeTab === 'akun' ? 'Contoh: Kasir @kasir2' : 'Deskripsi singkat kategori'} className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]" />
+                            <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                              {activeTab === 'akun' ? 'Role & Username' : 'Keterangan'}
+                            </label>
+                            <input
+                              type="text"
+                              value={catatanInput}
+                              onChange={(e) => setCatatanInput(e.target.value)}
+                              placeholder={activeTab === 'akun' ? 'Contoh: Kasir @kasir2' : 'Deskripsi singkat kategori'}
+                              className="w-full h-10 px-3.5 rounded-xl border border-zinc-200 text-sm focus:outline-none focus:border-[#C62828]"
+                            />
                           </div>
                         )}
                       </>
                     )}
-                    <label className="flex items-center justify-between pt-1 cursor-pointer">
-                      <span className="text-xs font-semibold text-zinc-700">Status Aktif</span>
-                      <input type="checkbox" checked={aktifInput} onChange={(e) => setAktifInput(e.target.checked)} className="w-4 h-4 accent-[#C62828]" />
-                    </label>
-                    <button type="submit" className="w-full h-11 rounded-full bg-gradient-to-r from-[#D32F2F] to-[#8E1418] text-white text-sm font-bold shadow-sm hover:opacity-95 transition-opacity">
-                      Simpan Perubahan
-                    </button>
                   </div>
                 )}
+
+                {!(activeTab === 'menu' && editingRow) && (
+                  <label className="flex items-center justify-between pt-1 cursor-pointer">
+                    <span className="text-xs font-semibold text-zinc-700">Status Aktif</span>
+                    <input
+                      type="checkbox"
+                      checked={aktifInput}
+                      onChange={(e) => setAktifInput(e.target.checked)}
+                      className="w-4 h-4 accent-[#C62828]"
+                    />
+                  </label>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="w-full h-11 rounded-full bg-gradient-to-r from-[#D32F2F] to-[#8E1418] text-white text-sm font-bold shadow-sm hover:opacity-95 disabled:opacity-60 transition-opacity"
+                >
+                  {saving ? 'Menyimpan...' : 'Simpan Perubahan'}
+                </button>
               </div>
             </form>
           </div>

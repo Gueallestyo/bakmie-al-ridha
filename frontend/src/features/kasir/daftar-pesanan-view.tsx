@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
@@ -11,6 +11,7 @@ import type { OrderType } from '@/features/kasir/input-pesanan-view'
 export type DaftarOrderStatus = 'Belum Dibayar' | 'Dibayar' | 'Batal' | 'Refund'
 
 export interface DaftarOrderItem {
+  idPesanan?: string
   nomorPesanan: string
   jenisPesanan: OrderType
   nomorMeja?: string | null
@@ -20,6 +21,8 @@ export interface DaftarOrderItem {
   alasan?: string
   persiapanDimulai?: boolean
 }
+
+const REQUEST_TIMEOUT_MS = 15000
 
 function formatRupiah(amount: number): string {
   return `Rp${Math.max(0, Math.round(amount)).toLocaleString('id-ID')}`
@@ -38,6 +41,29 @@ function getOrderSubtitle(order: DaftarOrderItem): string {
   return base
 }
 
+async function runWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(
+        new Error(
+          'Permintaan terlalu lama (timeout). Periksa koneksi atau respons server.',
+        ),
+      )
+    }, timeoutMs)
+  })
+
+  try {
+    return await Promise.race([promise, timeoutPromise])
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
+}
+
 export default function DaftarPesananView({
   highlightedOrderNumber,
   userRole = 'admin',
@@ -46,6 +72,8 @@ export default function DaftarPesananView({
   userRole?: 'admin' | 'kasir'
 }) {
   const router = useRouter()
+  const reasonInputRef = useRef<HTMLInputElement | null>(null)
+  const isMountedRef = useRef(true)
 
   const [orders, setOrders] = useState<DaftarOrderItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -56,6 +84,9 @@ export default function DaftarPesananView({
 
   const [reasonText, setReasonText] = useState('')
   const [persiapanDimulai, setPersiapanDimulai] = useState(false)
+  const [processingOrderNumber, setProcessingOrderNumber] = useState<
+    string | null
+  >(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [infoMessage, setInfoMessage] = useState<string | null>(null)
 
@@ -63,15 +94,24 @@ export default function DaftarPesananView({
   const [signingOut, setSigningOut] = useState(false)
 
   useEffect(() => {
-    loadOrders()
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
   }, [])
 
-  async function loadOrders() {
-    setLoading(true)
-    setError(null)
+  const loadOrders = useCallback(async () => {
+    if (isMountedRef.current) {
+      setLoading(true)
+      setError(null)
+    }
+
     try {
-      const data = await daftarPesanan()
+      const data = await runWithTimeout(daftarPesanan())
+      if (!isMountedRef.current) return
+
       const mapped: DaftarOrderItem[] = (data ?? []).map((p: any) => ({
+        idPesanan: p.id_pesanan ?? undefined,
         nomorPesanan: p.nomor_pesanan,
         jenisPesanan: p.jenis_pesanan === 'takeaway' ? 'takeaway' : 'dine_in',
         nomorMeja: p.nomor_meja ?? null,
@@ -95,11 +135,18 @@ export default function DaftarPesananView({
       }))
       setOrders(mapped)
     } catch (err: any) {
-      setError(err.message || 'Gagal memuat daftar pesanan.')
+      if (!isMountedRef.current) return
+      setError(err?.message || 'Gagal memuat daftar pesanan.')
     } finally {
-      setLoading(false)
+      if (isMountedRef.current) {
+        setLoading(false)
+      }
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    loadOrders()
+  }, [loadOrders])
 
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
@@ -114,6 +161,7 @@ export default function DaftarPesananView({
 
   function handlePayOrder(order: DaftarOrderItem) {
     const params = new URLSearchParams({
+      ...(order.idPesanan ? { id: order.idPesanan } : {}),
       nomor: order.nomorPesanan,
       total: String(order.totalHarga),
       jenis: order.jenisPesanan,
@@ -124,64 +172,98 @@ export default function DaftarPesananView({
     router.push(`/kasir/pembayaran?${params.toString()}`)
   }
 
+  function promptReasonInput() {
+    setErrorMessage('Alasan pembatalan / refund wajib diisi terlebih dahulu.')
+    setInfoMessage(null)
+    reasonInputRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+    })
+    reasonInputRef.current?.focus()
+  }
+
   const handleCancelOrder = useCallback(
-    async (order: DaftarOrderItem) => {
-      const trimmedReason = reasonText.trim()
-      if (!trimmedReason) {
-        setErrorMessage(
-          'Alasan pembatalan / refund wajib diisi terlebih dahulu.',
-        )
-        setInfoMessage(null)
-        return
-      }
+  async (order: DaftarOrderItem) => {
+    if (processingOrderNumber) return
 
-      setErrorMessage(null)
+    const trimmedReason = reasonText.trim()
+    if (!trimmedReason) {
+      promptReasonInput()
+      return
+    }
 
-      try {
-        await batalkanAtauRefundPesanan({
-          id_pesanan: order.nomorPesanan,
+    if (!order.idPesanan) {
+      setErrorMessage(
+        `ID pesanan untuk ${order.nomorPesanan} tidak ditemukan. Muat ulang halaman lalu coba lagi.`,
+      )
+      return
+    }
+
+    setErrorMessage(null)
+    setInfoMessage(null)
+    setProcessingOrderNumber(order.nomorPesanan)
+
+    try {
+      await runWithTimeout(
+        batalkanAtauRefundPesanan({
+          id_pesanan: order.idPesanan,
           aksi: 'batal',
           alasan: trimmedReason,
-        })
+        }),
+      )
 
-        setOrders((prev) =>
-          prev.map((item) =>
-            item.nomorPesanan === order.nomorPesanan
-              ? { ...item, status: 'Batal', alasan: trimmedReason }
-              : item,
-          ),
-        )
-        setReasonText('')
-        setInfoMessage(
-          `Pesanan ${order.nomorPesanan} dibatalkan (kuota tidak berubah).`,
-        )
-      } catch (err: any) {
-        setErrorMessage(err.message || 'Gagal membatalkan pesanan.')
-      }
-    },
-    [reasonText],
-  )
+      setOrders((prev) =>
+        prev.map((item) =>
+          item.nomorPesanan === order.nomorPesanan
+            ? { ...item, status: 'Batal', alasan: trimmedReason }
+            : item,
+        ),
+      )
+      setReasonText('')
+      setInfoMessage(
+        `Pesanan ${order.nomorPesanan} dibatalkan (kuota tidak berubah).`,
+      )
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Gagal membatalkan pesanan.')
+    } finally {
+      setProcessingOrderNumber(null)
+    }
+  },
+  [reasonText, processingOrderNumber],
+)
 
   const handleRefundOrder = useCallback(
     async (order: DaftarOrderItem) => {
+      if (processingOrderNumber) return
+
       const trimmedReason = reasonText.trim()
       if (!trimmedReason) {
+        promptReasonInput()
+        return
+      }
+
+      if (!order.idPesanan) {
         setErrorMessage(
-          'Alasan pembatalan / refund wajib diisi terlebih dahulu.',
+          `ID pesanan untuk ${order.nomorPesanan} tidak ditemukan. Muat ulang halaman lalu coba lagi.`,
         )
-        setInfoMessage(null)
         return
       }
 
       setErrorMessage(null)
+      setInfoMessage(null)
+      setProcessingOrderNumber(order.nomorPesanan)
 
       try {
-        await batalkanAtauRefundPesanan({
-          id_pesanan: order.nomorPesanan,
-          aksi: 'refund',
-          alasan: trimmedReason,
-          persiapan_dimulai: persiapanDimulai,
-        })
+        await runWithTimeout(
+          batalkanAtauRefundPesanan({
+            id_pesanan: order.idPesanan,
+            aksi: 'refund',
+            alasan: trimmedReason,
+            persiapan_dimulai: persiapanDimulai,
+          }),
+        )
+
+        if (!isMountedRef.current) return
 
         const kuotaDikembalikan = !persiapanDimulai
 
@@ -204,16 +286,25 @@ export default function DaftarPesananView({
             : `Refund pesanan ${order.nomorPesanan} dicatat (kuota tidak dikembalikan karena persiapan sudah dimulai).`,
         )
       } catch (err: any) {
-        setErrorMessage(err.message || 'Gagal memproses refund.')
+        if (!isMountedRef.current) return
+        setErrorMessage(err?.message || 'Gagal memproses refund.')
+      } finally {
+        if (isMountedRef.current) {
+          setProcessingOrderNumber(null)
+        }
       }
     },
-    [reasonText, persiapanDimulai],
+    [reasonText, persiapanDimulai, processingOrderNumber],
   )
 
   async function handleLogout() {
     setSigningOut(true)
-    await signOut()
-    router.replace('/auth/login')
+    try {
+      await signOut()
+      router.replace('/auth/login')
+    } finally {
+      setSigningOut(false)
+    }
   }
 
   if (loading) {
@@ -223,8 +314,6 @@ export default function DaftarPesananView({
       </div>
     )
   }
-
-  // Error akan ditampilkan di dalam form di bawah hero section
 
   return (
     <div className="min-h-screen bg-[#F9F7F6] flex justify-center">
@@ -289,10 +378,18 @@ export default function DaftarPesananView({
         </section>
 
         {error && (
-          <div className="p-4 mb-2 rounded-lg bg-red-50 border border-red-200">
+          <div className="mx-4 mt-3 p-4 rounded-lg bg-red-50 border border-red-200 flex items-center justify-between gap-2">
             <p className="text-sm font-semibold text-red-800">{error}</p>
+            <button
+              type="button"
+              onClick={loadOrders}
+              className="px-3 py-1 rounded-md bg-red-700 text-white text-xs font-bold shrink-0"
+            >
+              Muat Ulang
+            </button>
           </div>
         )}
+
         {/* Konten Utama Daftar Pesanan */}
         <main className="px-4 pt-4 space-y-3.5 flex-1">
           {/* Filter Pills */}
@@ -326,6 +423,8 @@ export default function DaftarPesananView({
           ) : (
             <div className="space-y-3">
               {filteredOrders.map((order) => {
+                const isBusy = processingOrderNumber === order.nomorPesanan
+
                 const accentClass =
                   order.status === 'Belum Dibayar'
                     ? 'bg-[#C62828]'
@@ -350,7 +449,7 @@ export default function DaftarPesananView({
 
                 return (
                   <div
-                    key={order.nomorPesanan}
+                    key={order.idPesanan || order.nomorPesanan}
                     className={`relative overflow-hidden rounded-2xl border bg-white pl-5 pr-4 py-3.5 shadow-[0_1px_2px_rgba(0,0,0,0.02)] ${
                       isHighlighted ? 'border-[#C62828]' : 'border-[#F2E2DF]'
                     }`}
@@ -393,17 +492,19 @@ export default function DaftarPesananView({
                       <div className="grid grid-cols-2 gap-2.5 mt-3">
                         <button
                           type="button"
+                          disabled={Boolean(processingOrderNumber)}
                           onClick={() => handlePayOrder(order)}
-                          className="h-9 rounded-full bg-gradient-to-r from-[#D32F2F] to-[#9A171B] text-white text-[12.5px] font-bold hover:opacity-95 transition-opacity"
+                          className="h-9 rounded-full bg-gradient-to-r from-[#D32F2F] to-[#9A171B] text-white text-[12.5px] font-bold hover:opacity-95 disabled:opacity-50 transition-opacity"
                         >
                           Bayar
                         </button>
                         <button
                           type="button"
+                          disabled={Boolean(processingOrderNumber)}
                           onClick={() => handleCancelOrder(order)}
-                          className="h-9 rounded-full border border-[#C62828] bg-white text-[#C62828] text-[12.5px] font-bold hover:bg-red-50 transition-colors"
+                          className="h-9 rounded-full border border-[#C62828] bg-white text-[#C62828] text-[12.5px] font-bold hover:bg-red-50 disabled:opacity-50 transition-colors"
                         >
-                          Batalkan
+                          {isBusy ? 'Membatalkan...' : 'Batalkan'}
                         </button>
                       </div>
                     )}
@@ -412,10 +513,11 @@ export default function DaftarPesananView({
                       <div className="mt-3">
                         <button
                           type="button"
+                          disabled={Boolean(processingOrderNumber)}
                           onClick={() => handleRefundOrder(order)}
-                          className="w-full h-9 rounded-full border border-[#C62828] bg-white text-[#C62828] text-[12.5px] font-bold hover:bg-red-50 transition-colors"
+                          className="w-full h-9 rounded-full border border-[#C62828] bg-white text-[#C62828] text-[12.5px] font-bold hover:bg-red-50 disabled:opacity-50 transition-colors"
                         >
-                          Catat Refund
+                          {isBusy ? 'Memproses...' : 'Catat Refund'}
                         </button>
                       </div>
                     )}
@@ -434,6 +536,7 @@ export default function DaftarPesananView({
               Alasan pembatalan / refund
             </label>
             <input
+              ref={reasonInputRef}
               id="alasan-batal-refund"
               type="text"
               value={reasonText}

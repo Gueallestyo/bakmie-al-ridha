@@ -172,17 +172,43 @@ export default function RingkasanPesananView({
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
 
+  const storedDraft = useMemo(() => {
+    if (typeof window === 'undefined') return null
+    try {
+      const raw = window.sessionStorage.getItem('bakmie_ringkasan_pesanan')
+      if (!raw) return null
+      return JSON.parse(raw) as {
+        orderNumber?: string
+        orderType?: OrderType
+        tableNumber?: string | null
+        items?: RingkasanItemInput[]
+      }
+    } catch {
+      return null
+    }
+  }, [])
+
+  const resolvedOrderNumber = orderNumber || storedDraft?.orderNumber || ''
+  const resolvedOrderType: OrderType =
+    storedDraft?.orderType ?? orderType ?? 'dine_in'
+  const resolvedTableNumber =
+    resolvedOrderType === 'takeaway'
+      ? null
+      : (tableNumber ?? storedDraft?.tableNumber ?? null)
+
   const resolvedItems = useMemo(() => {
     if (items && items.length > 0) return items
+    if (storedDraft?.items && storedDraft.items.length > 0) return storedDraft.items
     return parseItemsFromQuery(rawItemsParam)
-  }, [items, rawItemsParam])
+  }, [items, storedDraft, rawItemsParam])
 
   const computedRows = useMemo(() => {
     return resolvedItems.map((item) => {
-      const toppingPrice = item.hargaTopping ?? 0
+      const hasTopping = Boolean(item.toppingNama) && (item.hargaTopping ?? 0) > 0
+      const toppingPrice = hasTopping ? (item.hargaTopping ?? 0) : 0
       const unitWithTopping = item.hargaSatuan + toppingPrice
       const subtotal = unitWithTopping * item.jumlah
-      const formulaText = item.toppingNama
+      const formulaText = hasTopping
         ? `(${formatRupiah(item.hargaSatuan)} + ${item.toppingNama} ${formatRupiah(
             toppingPrice,
           )}) × ${item.jumlah}`
@@ -202,6 +228,16 @@ export default function RingkasanPesananView({
 
   const hasOrderedItems = computedRows.length > 0 && totalPesanan > 0
 
+  const headerSubtitle = useMemo(() => {
+    const tipeLabel =
+      resolvedOrderType === 'takeaway'
+        ? 'Takeaway'
+        : `Dine-in · Meja ${resolvedTableNumber?.trim() || '-'}`
+    return resolvedOrderNumber
+      ? `${resolvedOrderNumber} · ${tipeLabel}`
+      : tipeLabel
+  }, [resolvedOrderNumber, resolvedOrderType, resolvedTableNumber])
+
   function handleBack() {
     if (onBackToInput) {
       onBackToInput()
@@ -211,43 +247,49 @@ export default function RingkasanPesananView({
   }
 
   async function handleSimpanPesanan() {
+    if (savingOrder) return
     if (!hasOrderedItems) {
       setFeedbackMessage(
         'Pilih minimal satu menu terlebih dahulu sebelum menyimpan pesanan.',
       )
       return
     }
-    if (savingOrder) return
 
     setSavingOrder(true)
     setFeedbackMessage(null)
 
+    const cleanNote = catatanKhusus.trim() || null
     const cleanOrderId =
-      orderNumber?.replace(/^No\.\s*/i, '').trim() ||
+      resolvedOrderNumber.replace(/^No\.\s*/i, '').trim() ||
       `P-${Date.now().toString().slice(-6)}`
 
     const itemsPayload = computedRows.map((row) => ({
       id_menu: row.menuId,
       jumlah: row.jumlah,
       harga_satuan: row.hargaSatuan,
-      catatan_khusus: null,
+      catatan_khusus: cleanNote,
       subtotal: row.subtotal,
       detail_topping: [],
     }))
 
     try {
       const result = await buatPesanan({
-        jenis_pesanan: orderType,
+        jenis_pesanan: resolvedOrderType,
         nomor_meja:
-          orderType === 'dine_in' && tableNumber
-            ? tableNumber.trim()
+          resolvedOrderType === 'dine_in' && resolvedTableNumber
+            ? resolvedTableNumber.trim()
             : null,
         items: itemsPayload,
-        catatan_khusus: catatanKhusus.trim() || null,
+        catatan_khusus: cleanNote,
         total_harga: totalPesanan,
       })
 
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.removeItem('bakmie_ringkasan_pesanan')
+      }
+
       const savedNomor = result.pesanan?.nomor_pesanan || cleanOrderId
+      const savedId = result.pesanan?.id_pesanan || ''
 
       if (onSavedOrder) {
         onSavedOrder(savedNomor)
@@ -256,11 +298,12 @@ export default function RingkasanPesananView({
       }
 
       const params = new URLSearchParams({
+        ...(savedId ? { id: savedId } : {}),
         nomor: savedNomor,
         total: String(totalPesanan),
-        jenis: orderType,
-        ...(orderType === 'dine_in' && tableNumber
-          ? { meja: tableNumber.trim() }
+        jenis: resolvedOrderType,
+        ...(resolvedOrderType === 'dine_in' && resolvedTableNumber
+          ? { meja: resolvedTableNumber.trim() }
           : {}),
       })
 
@@ -329,7 +372,7 @@ export default function RingkasanPesananView({
           </button>
         </header>
 
-        {/* Hero Merah Gradasi dengan Tombol Kembali & Nomor Pesanan */}
+        {/* Hero Merah Gradasi dengan Tombol Kembali & Info Pesanan */}
         <section className="bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] px-5 pt-5 pb-6 rounded-b-[28px] text-white shadow-sm">
           <div className="flex items-start gap-3">
             <button
@@ -357,7 +400,7 @@ export default function RingkasanPesananView({
                 Ringkasan Pesanan
               </h1>
               <p className="text-[12.5px] text-red-100/90 mt-0.5 font-normal">
-                {orderNumber}
+                {headerSubtitle}
               </p>
             </div>
           </div>

@@ -42,7 +42,7 @@ async function RingkasanPageContent({ searchParams }: RingkasanPageProps) {
   const tableNumber =
     parsedType === 'dine_in' && resolvedParams.meja?.trim()
       ? resolvedParams.meja.trim()
-      : undefined
+      : null
 
   return (
     <KasirAccessGuard role="kasir-or-admin">

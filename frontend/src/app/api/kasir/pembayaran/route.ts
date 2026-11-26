@@ -1,6 +1,9 @@
 import { requireKasirOrAdminApi } from '@/lib/auth/rbac'
 import { createAdminClient } from '@/lib/supabase/admin'
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export async function PATCH(request: Request) {
   const { profile, errorResponse } = await requireKasirOrAdminApi()
 
@@ -12,32 +15,92 @@ export async function PATCH(request: Request) {
     const body = await request.json()
     const {
       id_pesanan,
+      nomor_pesanan,
       metode_pembayaran,
       uang_diterima,
       jumlah_dibayar,
-    } = body
+    } = body as {
+      id_pesanan?: string
+      nomor_pesanan?: string
+      metode_pembayaran?: 'tunai' | 'qris'
+      uang_diterima?: number | null
+      jumlah_dibayar?: number
+    }
 
-    if (!id_pesanan) {
-      return NextResponseError('ID pesanan wajib diisi.', 400)
+    const rawId = typeof id_pesanan === 'string' ? id_pesanan.trim() : ''
+    const cleanNomor =
+      typeof nomor_pesanan === 'string'
+        ? nomor_pesanan.replace(/^No\.\s*/i, '').trim()
+        : ''
+
+    const cleanId = UUID_REGEX.test(rawId) ? rawId : ''
+    const fallbackNomor =
+      cleanNomor ||
+      (!UUID_REGEX.test(rawId) ? rawId.replace(/^No\.\s*/i, '').trim() : '')
+
+    if (!cleanId && !fallbackNomor) {
+      return NextResponseError('ID atau nomor pesanan wajib diisi.', 400)
     }
     if (!metode_pembayaran || !['tunai', 'qris'].includes(metode_pembayaran)) {
-      return NextResponseError("Metode pembayaran harus 'tunai' atau 'qris'.", 400)
+      return NextResponseError(
+        "Metode pembayaran harus 'tunai' atau 'qris'.",
+        400,
+      )
     }
 
     const admin = createAdminClient()
 
-    // Ambil pesanan saat ini
-    const { data: pesanan, error: pesananError } = await admin
-      .from('pesanan')
-      .select('id_pesanan, nomor_pesanan, status_pesanan, id_kasir, total_harga, dibuat_pada')
-      .eq('id_pesanan', id_pesanan)
-      .single()
+    let pesanan: {
+      id_pesanan: string
+      nomor_pesanan: string
+      status_pesanan: string
+      id_kasir: string | null
+      total_harga: number | string
+      dibuat_pada: string
+    } | null = null
 
-    if (pesananError || !pesanan) {
+    if (cleanId) {
+      const { data: rowsById, error: errById } = await admin
+        .from('pesanan')
+        .select(
+          'id_pesanan, nomor_pesanan, status_pesanan, id_kasir, total_harga, dibuat_pada',
+        )
+        .eq('id_pesanan', cleanId)
+        .limit(1)
+
+      if (errById) {
+        return NextResponseError(
+          `Gagal mencari pesanan: ${errById.message}`,
+          500,
+        )
+      }
+      pesanan = rowsById?.[0] ?? null
+    }
+
+    if (!pesanan && fallbackNomor) {
+      const { data: rowsByNomor, error: errByNomor } = await admin
+        .from('pesanan')
+        .select(
+          'id_pesanan, nomor_pesanan, status_pesanan, id_kasir, total_harga, dibuat_pada',
+        )
+        .ilike('nomor_pesanan', fallbackNomor)
+        .limit(1)
+
+      if (errByNomor) {
+        return NextResponseError(
+          `Gagal mencari pesanan: ${errByNomor.message}`,
+          500,
+        )
+      }
+      pesanan = rowsByNomor?.[0] ?? null
+    }
+
+    if (!pesanan) {
       return NextResponseError('Pesanan tidak ditemukan.', 404)
     }
 
-    // Cegah validasi ulang jika sudah dibayar, batal, atau refund
+    const targetId = pesanan.id_pesanan
+
     if (pesanan.status_pesanan !== 'dibuat') {
       return NextResponseError(
         `Pesanan sudah berstatus ${pesanan.status_pesanan}, tidak dapat divalidasi ulang.`,
@@ -45,105 +108,99 @@ export async function PATCH(request: Request) {
       )
     }
 
-    // Validasi jumlah pembayaran
     if (!jumlah_dibayar || Number(jumlah_dibayar) <= 0) {
       return NextResponseError('Jumlah dibayar wajib lebih dari nol.', 400)
     }
     if (Number(jumlah_dibayar) < Number(pesanan.total_harga)) {
-      return NextResponseError('Jumlah dibayar kurang dari total pesanan.', 400)
+      return NextResponseError(
+        'Jumlah dibayar kurang dari total pesanan.',
+        400,
+      )
     }
 
-    // Hitung kembalian
     let kembalian = 0
-    let uangDiterima = null
+    let uangDiterima: number | null = null
 
     if (metode_pembayaran === 'tunai') {
-      if (!uang_diterima || Number(uang_diterima) < Number(jumlah_dibayar)) {
-        return NextResponseError('Uang diterima tidak mencukupi untuk menutup total pesanan.', 400)
+      if (
+        uang_diterima === null ||
+        uang_diterima === undefined ||
+        Number(uang_diterima) < Number(jumlah_dibayar)
+      ) {
+        return NextResponseError(
+          'Uang diterima tidak mencukupi untuk menutup total pesanan.',
+          400,
+        )
       }
       uangDiterima = Number(uang_diterima)
       kembalian = Number(uang_diterima) - Number(jumlah_dibayar)
     } else if (metode_pembayaran === 'qris') {
-      // QRIS: uang_diterima = NULL, kembalian = 0
       uangDiterima = null
       kembalian = 0
     }
 
     const now = new Date().toISOString()
 
-    // Gunakan transaksi atomik: simpan pembayaran, update pesanan, kurangi kuota, catat riwayat
-    // Mulai dengan pembayaran
-    const { error: pembayaranError } = await admin
-      .from('pembayaran')
-      .insert({
-        id_pesanan,
-        metode_pembayaran,
-        jumlah_dibayar: Number(jumlah_dibayar),
-        uang_diterima: uangDiterima,
-        kembalian,
-        divalidasi_oleh: profile.id_pengguna,
-        divalidasi_pada: now,
-      })
+    const { error: pembayaranError } = await admin.from('pembayaran').insert({
+      id_pesanan: targetId,
+      metode_pembayaran,
+      jumlah_dibayar: Number(jumlah_dibayar),
+      uang_diterima: uangDiterima,
+      kembalian,
+      divalidasi_oleh: profile.id_pengguna,
+      divalidasi_pada: now,
+    })
 
     if (pembayaranError) {
-      return NextResponseError('Gagal mencatat pembayaran.', 500)
+      return NextResponseError(
+        `Gagal mencatat pembayaran: ${pembayaranError.message}`,
+        500,
+      )
     }
 
-    // Update status pesanan menjadi 'dibayar'
     const { error: updatePesananError } = await admin
       .from('pesanan')
       .update({ status_pesanan: 'dibayar' })
-      .eq('id_pesanan', id_pesanan)
+      .eq('id_pesanan', targetId)
 
     if (updatePesananError) {
-      // Rollback pembayaran
-      await admin.from('pembayaran').delete().eq('id_pesanan', id_pesanan)
-      return NextResponseError('Gagal memperbarui status pesanan.', 500)
+      await admin.from('pembayaran').delete().eq('id_pesanan', targetId)
+      return NextResponseError(
+        `Gagal memperbarui status pesanan: ${updatePesananError.message}`,
+        500,
+      )
     }
 
-    // Kurangi kuota_harian.sisa_porsi untuk setiap item dalam pesanan
-    const { data: detailPesanan, error: detailError } = await admin
-      .from('detail_pesanan')
-      .select('id_menu, jumlah')
-      .eq('id_pesanan', id_pesanan)
+    const { error: riwayatError } = await admin
+      .from('riwayat_status_pesanan')
+      .insert({
+        id_pesanan: targetId,
+        status_awal: 'dibuat',
+        status_akhir: 'dibayar',
+        alasan: 'Pembayaran divalidasi',
+        persiapan_dimulai: false,
+        kuota_dikembalikan: false,
+        id_pengguna: profile.id_pengguna,
+        waktu_perubahan: now,
+      })
 
-    if (!detailError && detailPesanan) {
-      const today = new Date(pesanan.dibuat_pada).toISOString().split('T')[0]
-
-      for (const item of detailPesanan) {
-        const { data: kuota, error: kuotaError } = await admin
-          .from('kuota_harian')
-          .select('id_kuota, sisa_porsi')
-          .eq('id_menu', item.id_menu)
-          .eq('tanggal', today)
-          .single()
-
-        if (!kuotaError && kuota) {
-          const newSisa = Math.max(0, kuota.sisa_porsi - item.jumlah)
-          await admin
-            .from('kuota_harian')
-            .update({ sisa_porsi: newSisa })
-            .eq('id_kuota', kuota.id_kuota)
-        }
-      }
+    if (riwayatError) {
+      await admin
+        .from('pesanan')
+        .update({ status_pesanan: 'dibuat' })
+        .eq('id_pesanan', targetId)
+      await admin.from('pembayaran').delete().eq('id_pesanan', targetId)
+      return NextResponseError(
+        `Gagal mencatat riwayat status pembayaran: ${riwayatError.message}`,
+        500,
+      )
     }
-
-    // Catat ke riwayat_status_pesanan
-    await admin.from('riwayat_status_pesanan').insert({
-      id_pesanan,
-      status_awal: 'dibuat',
-      status_akhir: 'dibayar',
-      alasan: 'Pembayaran divalidasi',
-      persiapan_dimulai: false,
-      kuota_dikembalikan: false,
-      id_pengguna: profile.id_pengguna,
-      waktu_perubahan: now,
-    })
 
     return Response.json({
       message: 'Pembayaran berhasil divalidasi.',
       pembayaran: {
-        id_pesanan,
+        id_pesanan: targetId,
+        nomor_pesanan: pesanan.nomor_pesanan,
         metode_pembayaran,
         jumlah_dibayar: Number(jumlah_dibayar),
         uang_diterima: uangDiterima,
@@ -151,8 +208,11 @@ export async function PATCH(request: Request) {
         status_pesanan: 'dibayar',
       },
     })
-  } catch {
-    return NextResponseError('Terjadi kesalahan saat memvalidasi pembayaran.', 500)
+  } catch (err: any) {
+    return NextResponseError(
+      err?.message || 'Terjadi kesalahan saat memvalidasi pembayaran.',
+      500,
+    )
   }
 }
 

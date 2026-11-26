@@ -1,12 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
 import {
   daftarKuotaHarian,
-  buatKuotaHarian,
   ubahKuotaHarian,
 } from '@/lib/api/admin'
 import MobileAdminDrawer from '@/components/layout/mobile-admin-drawer'
@@ -20,8 +19,14 @@ export interface DailyQuotaItem {
   ambang: number
 }
 
-function formatRupiah(amount: number): string {
-  return `Rp${amount.toLocaleString('id-ID')}`
+function formatJakartaLongDate(): string {
+  return new Date().toLocaleDateString('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  })
 }
 
 function getQuotaStatus(item: DailyQuotaItem): {
@@ -64,6 +69,7 @@ export default function KuotaHarianView() {
   const [items, setItems] = useState<DailyQuotaItem[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [kuotaInput, setKuotaInput] = useState<string>('')
@@ -72,48 +78,62 @@ export default function KuotaHarianView() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
 
-  useEffect(() => {
-    loadKuota()
-  }, [])
+  const lastSelectedIdRef = useRef<string | null>(null)
 
-  async function loadKuota() {
+  const loadKuota = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       const data = await daftarKuotaHarian()
-      const mapped: DailyQuotaItem[] = data.map((k) => ({
-        id: k.id_kuota,
-        id_menu: k.id_menu,
-        nama: k.menu?.nama_menu ?? k.menu?.nama_kategori ?? 'Menu',
-        sisa: Number(k.sisa_porsi),
-        kuota: Number(k.kuota_awal),
-        ambang: Number(k.ambang_peringatan),
-      }))
+      const mapped: DailyQuotaItem[] = data.map((k: any) => {
+  const menuObj = k.menu as { nama_menu?: string; nama_kategori?: string } | undefined
+  return {
+    id: String(k.id_kuota),
+    id_menu: String(k.id_menu),
+    nama: menuObj?.nama_menu ?? menuObj?.nama_kategori ?? 'Menu',
+    sisa: Number(k.sisa_porsi),
+    kuota: Number(k.kuota_awal),
+    ambang: Number(k.ambang_peringatan),
+  }
+})
       setItems(mapped)
       if (mapped.length > 0) {
-        setSelectedId(mapped[0].id)
+        setSelectedId((prev) =>
+          prev && mapped.some((m) => m.id === prev) ? prev : mapped[0].id,
+        )
       }
-    } catch (err: any) {
-      setError(err.message || 'Gagal memuat data kuota.')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Gagal memuat data kuota.')
     } finally {
       setLoading(false)
     }
-  }
-
-  const activeItem =
-    items.find((item) => item.id === selectedId) ?? null
+  }, [])
 
   useEffect(() => {
-    if (activeItem) {
+    void loadKuota()
+  }, [loadKuota])
+
+  const activeItem = items.find((item) => item.id === selectedId) ?? null
+
+  useEffect(() => {
+    if (!activeItem) {
+      lastSelectedIdRef.current = null
+      setKuotaInput('')
+      setAmbangInput('')
+      return
+    }
+
+    if (lastSelectedIdRef.current !== activeItem.id) {
+      lastSelectedIdRef.current = activeItem.id
       setKuotaInput(String(activeItem.kuota))
       setAmbangInput(String(activeItem.ambang))
       setSavedNotice(null)
     }
-  }, [activeItem, kuotaInput, ambangInput, savedNotice])
+  }, [activeItem])
 
   async function handleSaveQuota(e: React.FormEvent) {
     e.preventDefault()
-    if (!activeItem) return
+    if (!activeItem || saving) return
 
     const nextKuota = Math.max(0, Number(kuotaInput) || 0)
     const nextAmbang = Math.max(0, Number(ambangInput) || 0)
@@ -123,6 +143,8 @@ export default function KuotaHarianView() {
       return
     }
 
+    setSaving(true)
+    setError(null)
     try {
       await ubahKuotaHarian({
         id_kuota: activeItem.id,
@@ -130,19 +152,24 @@ export default function KuotaHarianView() {
         ambang_peringatan: nextAmbang,
       })
 
+      const delta = nextKuota - activeItem.kuota
+      const nextSisa = Math.max(0, Math.min(nextKuota, activeItem.sisa + delta))
+
       setItems((prev) =>
         prev.map((row) =>
-          row.id === activeItem!.id
-            ? { ...row, kuota: nextKuota, ambang: nextAmbang }
+          row.id === activeItem.id
+            ? { ...row, kuota: nextKuota, sisa: nextSisa, ambang: nextAmbang }
             : row,
         ),
       )
 
       setKuotaInput(String(nextKuota))
       setAmbangInput(String(nextAmbang))
-      setSavedNotice(`Kuota ${activeItem!.nama} diperbarui.`)
-    } catch (err: any) {
-      setError(err.message || 'Gagal menyimpan kuota.')
+      setSavedNotice(`Kuota ${activeItem.nama} diperbarui.`)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Gagal menyimpan kuota.')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -167,7 +194,8 @@ export default function KuotaHarianView() {
           <h1 className="text-xl font-bold text-zinc-900">Gagal Memuat</h1>
           <p className="text-zinc-600 mt-2">{error}</p>
           <button
-            onClick={() => loadKuota()}
+            type="button"
+            onClick={() => void loadKuota()}
             className="mt-4 px-4 py-2 border border-red-200 rounded-lg text-red-700 hover:bg-red-50 transition-colors"
           >
             Coba Lagi
@@ -239,7 +267,7 @@ export default function KuotaHarianView() {
 
         <form
           id="form-kuota-harian"
-          onSubmit={handleSaveQuota}
+          onSubmit={(e) => void handleSaveQuota(e)}
           className="px-4 pt-5 space-y-3.5 flex-1"
         >
           <div className="rounded-2xl border border-[#F3E2DF] bg-white px-4 py-3.5 flex items-center justify-between gap-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
@@ -248,7 +276,7 @@ export default function KuotaHarianView() {
                 Hari ini
               </p>
               <p className="text-[12px] text-[#7A6A68] mt-0.5">
-                {new Date().toLocaleDateString('id-ID')}
+                {formatJakartaLongDate()}
               </p>
             </div>
 
@@ -375,9 +403,10 @@ export default function KuotaHarianView() {
           <button
             type="submit"
             form="form-kuota-harian"
-            className="w-full h-12 rounded-full bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] text-white text-[14.5px] font-bold shadow-md hover:opacity-95 transition-opacity flex items-center justify-center"
+            disabled={saving}
+            className="w-full h-12 rounded-full bg-gradient-to-r from-[#D32F2F] via-[#B71C1C] to-[#8E1418] text-white text-[14.5px] font-bold shadow-md hover:opacity-95 disabled:opacity-60 transition-opacity flex items-center justify-center"
           >
-            Simpan Kuota
+            {saving ? 'Menyimpan...' : 'Simpan Kuota'}
           </button>
         </div>
 

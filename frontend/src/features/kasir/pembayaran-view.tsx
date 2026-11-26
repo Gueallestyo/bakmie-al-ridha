@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signOut } from '@/features/auth/auth-actions'
@@ -11,6 +11,7 @@ import type { OrderType } from '@/features/kasir/input-pesanan-view'
 export type PaymentMethod = 'tunai' | 'qris'
 
 interface PembayaranViewProps {
+  orderId?: string
   orderNumber?: string
   totalAmount?: number
   orderType?: OrderType
@@ -36,6 +37,7 @@ function parseRupiahInput(raw: string): number {
 }
 
 export default function PembayaranView({
+  orderId = '',
   orderNumber = '',
   totalAmount = 0,
   orderType = 'dine_in',
@@ -61,6 +63,18 @@ export default function PembayaranView({
 
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
+
+  useEffect(() => {
+    setPaymentMethod('tunai')
+    setPaymentStatus(initialStatus)
+    setErrorMessage(null)
+    setInfoMessage(null)
+    setSubmitting(false)
+    setQrisConfirmed(false)
+    setCashInput(
+      totalAmount > 0 ? formatRupiah(totalAmount) : formatRupiah(50000),
+    )
+  }, [orderId, orderNumber, totalAmount, initialStatus])
 
   const cashReceived = useMemo(() => parseRupiahInput(cashInput), [cashInput])
 
@@ -91,10 +105,19 @@ export default function PembayaranView({
   async function handleValidatePayment() {
     if (submitting) return
     if (paymentStatus === 'Dibayar') return
-    if (!orderNumber || !totalAmount) {
+
+    const cleanOrderNumber = orderNumber.replace(/^No\.\s*/i, '').trim()
+    const cleanOrderId = orderId.trim()
+
+    if (!cleanOrderNumber && !cleanOrderId) {
       setErrorMessage('Data pesanan tidak lengkap.')
       return
     }
+    if (!totalAmount || Number(totalAmount) <= 0) {
+      setErrorMessage('Total tagihan tidak valid.')
+      return
+    }
+
     setErrorMessage(null)
     setInfoMessage(null)
 
@@ -114,16 +137,13 @@ export default function PembayaranView({
 
     setSubmitting(true)
 
-    const cleanOrderId = orderNumber.replace(/^No\.\s*/i, '').trim()
-
-    const uangDiterima =
-      paymentMethod === 'tunai' ? cashReceived : null
-    const kembalian =
-      paymentMethod === 'tunai' ? changeAmount : 0
+    const uangDiterima = paymentMethod === 'tunai' ? cashReceived : null
+    const kembalian = paymentMethod === 'tunai' ? changeAmount : 0
 
     try {
-      const result = await validasiPembayaran({
-        id_pesanan: cleanOrderId,
+      await validasiPembayaran({
+        ...(cleanOrderId ? { id_pesanan: cleanOrderId } : {}),
+        ...(cleanOrderNumber ? { nomor_pesanan: cleanOrderNumber } : {}),
         metode_pembayaran: paymentMethod,
         uang_diterima: uangDiterima,
         jumlah_dibayar: totalAmount,
@@ -133,30 +153,35 @@ export default function PembayaranView({
 
       if (onValidated) {
         onValidated({
-          orderNumber: cleanOrderId,
+          orderNumber: cleanOrderNumber || cleanOrderId,
           method: paymentMethod,
           cashReceived: uangDiterima,
           changeAmount: kembalian,
         })
-        setSubmitting(false)
         return
       }
 
       setInfoMessage(
-        `Pembayaran ${orderNumber} (${paymentMethod.toUpperCase()}) divalidasi. Kuota porsi diperbarui.`,
+        `Pembayaran ${orderNumber || cleanOrderNumber} (${paymentMethod.toUpperCase()}) divalidasi.`,
       )
-      setSubmitting(false)
-      router.push(`/kasir/daftar?nomor=${encodeURIComponent(cleanOrderId)}`)
+      router.push(
+        `/kasir/daftar?nomor=${encodeURIComponent(cleanOrderNumber || cleanOrderId)}`,
+      )
     } catch (err: any) {
-      setErrorMessage(err.message || 'Gagal memvalidasi pembayaran.')
+      setErrorMessage(err?.message || 'Gagal memvalidasi pembayaran.')
+    } finally {
       setSubmitting(false)
     }
   }
 
   async function handleLogout() {
     setSigningOut(true)
-    await signOut()
-    router.replace('/auth/login')
+    try {
+      await signOut()
+      router.replace('/auth/login')
+    } finally {
+      setSigningOut(false)
+    }
   }
 
   return (

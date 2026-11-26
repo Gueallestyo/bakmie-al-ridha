@@ -4,6 +4,7 @@ import RoleGuard from '@/components/auth/role-guard'
 import AuthLoading from '@/components/auth/auth-loading'
 import PembayaranView from '@/features/kasir/pembayaran-view'
 import type { OrderType } from '@/features/kasir/input-pesanan-view'
+import { createAdminClient } from '@/lib/supabase/admin'
 
 type BaseRole = ComponentProps<typeof RoleGuard>['role']
 
@@ -20,6 +21,7 @@ function KasirAccessGuard({
 
 interface PembayaranPageProps {
   searchParams: Promise<{
+    id?: string
     nomor?: string
     total?: string
     jenis?: string
@@ -34,11 +36,8 @@ async function PembayaranPageContent({ searchParams }: PembayaranPageProps) {
   const parsedType: OrderType =
     resolvedParams.jenis === 'takeaway' ? 'takeaway' : 'dine_in'
   const rawNomor = resolvedParams.nomor?.trim()
-  const formattedOrderNumber = rawNomor
-    ? rawNomor.toLowerCase().startsWith('no.')
-      ? rawNomor
-      : `No. ${rawNomor}`
-    : null
+  const cleanNomor = rawNomor ? rawNomor.replace(/^No\.\s*/i, '').trim() : ''
+  const formattedOrderNumber = cleanNomor ? `No. ${cleanNomor}` : null
   const parsedTotal = Number(resolvedParams.total ?? 0)
   const validTotal =
     Number.isFinite(parsedTotal) && parsedTotal > 0 ? parsedTotal : null
@@ -66,14 +65,43 @@ async function PembayaranPageContent({ searchParams }: PembayaranPageProps) {
     )
   }
 
+  let initialStatus: 'Belum Dibayar' | 'Dibayar' = 'Belum Dibayar'
+  let resolvedOrderId = resolvedParams.id?.trim() ?? ''
+
+  try {
+    const admin = createAdminClient()
+    const { data: rows } = await admin
+      .from('pesanan')
+      .select('id_pesanan, status_pesanan')
+      .ilike('nomor_pesanan', cleanNomor)
+      .limit(1)
+
+    const pesananRow = rows?.[0]
+    if (pesananRow) {
+      if (!resolvedOrderId && pesananRow.id_pesanan) {
+        resolvedOrderId = pesananRow.id_pesanan
+      }
+      if (pesananRow.status_pesanan === 'dibayar') {
+        initialStatus = 'Dibayar'
+      }
+    }
+  } catch {
+    initialStatus = 'Belum Dibayar'
+  }
+
+  const viewKey = `${cleanNomor}-${validTotal}-${initialStatus}-${resolvedOrderId}`
+
   return (
     <Suspense fallback={<AuthLoading />}>
       <KasirAccessGuard role="kasir-or-admin">
         <PembayaranView
+          key={viewKey}
+          orderId={resolvedOrderId}
           orderNumber={formattedOrderNumber}
           totalAmount={validTotal}
           orderType={parsedType}
           tableNumber={resolvedParams.meja?.trim()}
+          initialStatus={initialStatus}
         />
       </KasirAccessGuard>
     </Suspense>
